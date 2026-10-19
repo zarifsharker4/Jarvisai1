@@ -1,0 +1,28 @@
+{
+  "name": "mastercoder-ai-local",
+  "main": "build/worker.js",
+  "compatibility_date": "2026-10-19",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./build/dist",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mastercoder-local",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "vars": {
+    "FREEBUFF_CLIENT_ID": "555fb818-8152-4d79-9627-5b5af743e99d",
+    "FREEBUFF_CLIENT_ID": "555fb818-8152-4d79-9627-5b5af743e99d",
+    "FREEBUFF_ISSUER": "https://freebuff.com/oidc",
+    "APP_ORIGIN": "http://localhost:3002",
+    "APP_SECRET": "local-dev-only-secret-not-for-production",
+    "APP_ENV": "local"
+  }
+}
