@@ -247,7 +247,7 @@ export function Login() {
 
             <p className="landing-copy">
               {mode === 'login'
-                ? 'Email and password, then a 6-digit code from Vecna. No Google, no popups, no config screens.'
+                ? 'Email and password, then a 6-digit code from Vecna. No popups, no config screens, no third-party sign-in.'
                 : 'Pick an email and a password. Vecna mails you a 6-digit code to prove the address is yours.'}
             </p>
 
