@@ -1,22 +1,27 @@
-import { createFreebuffAuth, type FreebuffAuth, type FreebuffUser } from '@freebuff/auth';
 import {
-  encryptSecret,
-  decryptSecret,
   randomId,
   randomTag,
   readCookie,
   serializeCookie,
   signOpaque,
   verifyOpaque,
+  hashPin,
+  verifyPin,
 } from './crypto';
 import { ensureSchema } from './schema';
 import { sendWelcome } from './mail';
-import type { D1Database, Env, RequestUser, UserRow } from './types';
+import type { AuthCodeRow, D1Database, Env, RequestUser, UserRow } from './types';
 
 export const SESSION_COOKIE = 'mindflayer_session';
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const PIN_TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
-export const GOOGLE_STATE_TTL_MS = 10 * 60 * 1000;
+
+/** 6-digit codes live for 10 minutes and get exactly 5 guesses. */
+export const OTP_TTL_MS = 10 * 60 * 1000;
+export const OTP_MAX_ATTEMPTS = 5;
+export const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+export const PASSWORD_MIN_LENGTH = 8;
+export const PASSWORD_MAX_LENGTH = 200;
 
 /* ------------------------------------------------------------------ *
  * kv helpers
@@ -37,91 +42,168 @@ export async function kvSet(db: D1Database, key: string, value: string): Promise
 }
 
 /* ------------------------------------------------------------------ *
- * Sign in with Mind Flayer (primary, fully working auth)
+ * Email + password helpers
  * ------------------------------------------------------------------ */
 
-let authInstance: FreebuffAuth | null = null;
-let authKey = '';
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
 
-export const AUTH_PROVIDER_LABEL = 'Mind Flayer';
-
-export function isLoopbackOrigin(origin: string): boolean {
-  return /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/.test(origin);
+export function normalizeEmail(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const email = value.trim().toLowerCase();
+  if (email.length < 5 || email.length > 254) return null;
+  return EMAIL_RE.test(email) ? email : null;
 }
 
-export function freebuffAuth(env: Env): FreebuffAuth {
-  const key = `${env.FREEBUFF_CLIENT_ID ?? ''}|${env.FREEBUFF_ISSUER ?? ''}|${env.APP_ORIGIN}`;
-  if (!authInstance || authKey !== key) {
-    authInstance = createFreebuffAuth({
-      clientId: env.FREEBUFF_CLIENT_ID ?? '',
-      issuer: env.FREEBUFF_ISSUER,
-      baseUrl: env.APP_ORIGIN,
-      // Local workerd dev serves plain http on a loopback host; the SDK allows
-      // that only when explicitly opted in, and only for loopback origins.
-      allowInsecureLocalhost: isLoopbackOrigin(env.APP_ORIGIN),
-    });
-    authKey = key;
-  }
-  return authInstance;
+export function subForEmail(email: string): string {
+  return `email:${email}`;
 }
 
-/** Never let a misconfigured auth instance take down the whole Worker. */
-export function tryFreebuffAuth(env: Env): FreebuffAuth | null {
-  try {
-    return freebuffAuth(env);
-  } catch (err) {
-    console.error(`[auth] configuration rejected: ${(err as Error).message}`);
-    return null;
+/** Human-readable reason the password is unacceptable, or null when it is fine. */
+export function passwordProblem(value: unknown): string | null {
+  if (typeof value !== 'string') return 'Password is required';
+  if (value.length < PASSWORD_MIN_LENGTH) {
+    return `Password must be at least ${PASSWORD_MIN_LENGTH} characters`;
   }
-}
-
-/**
- * Resolve whoever is calling: a Mind Flayer session or a Google
- * account session issued by our own OAuth callback.
- */
-export async function resolveRequestUser(request: Request, env: Env): Promise<RequestUser | null> {
-  if (env.FREEBUFF_CLIENT_ID) {
-    try {
-      const user: FreebuffUser | null = await freebuffAuth(env).getUser(request);
-      if (user?.sub) {
-        return {
-          sub: user.sub,
-          provider: 'freebuff',
-          email: user.email,
-          name: user.name,
-          picture: user.picture,
-        };
-      }
-    } catch {
-      /* fall through to the Google session cookie */
-    }
-  }
-  if (env.APP_SECRET && env.DB) {
-    const token = readCookie(request.headers.get('cookie'), SESSION_COOKIE);
-    const payload = await verifyOpaque(env.APP_SECRET, token);
-    if (payload?.startsWith('sess:')) {
-      const sub = payload.slice('sess:'.length);
-      const row = await env.DB.prepare('SELECT * FROM users WHERE sub = ?1')
-        .bind(sub)
-        .first<UserRow>();
-      if (row) {
-        return {
-          sub: row.sub,
-          provider: row.provider === 'google' ? 'google' : 'freebuff',
-          email: row.email ?? undefined,
-          name: row.display_name ?? undefined,
-          picture: row.picture ?? undefined,
-        };
-      }
-    }
-  }
+  if (value.length > PASSWORD_MAX_LENGTH) return 'Password is too long';
   return null;
 }
 
-/** Cookie helpers for the Google session. */
+export function randomOtp(): string {
+  const buf = new Uint8Array(4);
+  crypto.getRandomValues(buf);
+  const n = new DataView(buf.buffer).getUint32(0) % 1_000_000;
+  return String(n).padStart(6, '0');
+}
+
+export async function findUserByEmail(db: D1Database, email: string): Promise<UserRow | null> {
+  return db.prepare('SELECT * FROM users WHERE email = ?1').bind(email).first<UserRow>();
+}
+
+/**
+ * Issue a fresh 6-digit code for an email. Any earlier unconsumed code for the
+ * same purpose is burned first, so only the newest mail is valid.
+ */
+export async function createAuthCode(
+  db: D1Database,
+  input: {
+    email: string;
+    purpose: 'signup' | 'login';
+    passwordHash?: string | null;
+    displayName?: string | null;
+  },
+): Promise<{ code: string; id: string }> {
+  await db
+    .prepare('UPDATE auth_codes SET consumed = 1 WHERE email = ?1 AND purpose = ?2 AND consumed = 0')
+    .bind(input.email, input.purpose)
+    .run();
+  const code = randomOtp();
+  const id = randomId(12);
+  await db
+    .prepare(
+      `INSERT INTO auth_codes (id, email, purpose, code_hash, password_hash, display_name, expires_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now', ?7))`,
+    )
+    .bind(
+      id,
+      input.email,
+      input.purpose,
+      await hashPin(code),
+      input.passwordHash ?? null,
+      input.displayName ?? null,
+      `+${Math.round(OTP_TTL_MS / 1000)} seconds`,
+    )
+    .run();
+  return { code, id };
+}
+
+/** True when a code for this email + purpose was issued inside the cooldown. */
+export async function codeJustIssued(
+  db: D1Database,
+  email: string,
+  purpose: 'signup' | 'login',
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT id FROM auth_codes
+        WHERE email = ?1 AND purpose = ?2 AND created_at > datetime('now', ?3)
+        ORDER BY created_at DESC LIMIT 1`,
+    )
+    .bind(email, purpose, `-${Math.round(OTP_RESEND_COOLDOWN_MS / 1000)} seconds`)
+    .first();
+  return Boolean(row);
+}
+
+export type OtpResult =
+  | { ok: true; row: AuthCodeRow }
+  | { ok: false; reason: 'no_code' | 'expired' | 'too_many_attempts' | 'bad_code' };
+
+/**
+ * Check a 6-digit code. Wrong guesses cost an attempt; a correct code is
+ * consumed immediately so it cannot be replayed.
+ */
+export async function verifyAuthCode(
+  db: D1Database,
+  email: string,
+  code: string,
+  purpose: 'signup' | 'login',
+): Promise<OtpResult> {
+  const row = await db
+    .prepare(
+      `SELECT * FROM auth_codes
+        WHERE email = ?1 AND purpose = ?2 AND consumed = 0
+        ORDER BY created_at DESC LIMIT 1`,
+    )
+    .bind(email, purpose)
+    .first<AuthCodeRow>();
+  if (!row) return { ok: false, reason: 'no_code' };
+  if (row.attempts >= OTP_MAX_ATTEMPTS) return { ok: false, reason: 'too_many_attempts' };
+
+  const fresh = await db
+    .prepare("SELECT (expires_at > datetime('now')) AS alive FROM auth_codes WHERE id = ?1")
+    .bind(row.id)
+    .first<{ alive: number }>();
+  if (!fresh?.alive) return { ok: false, reason: 'expired' };
+
+  const matches = /^\d{6}$/.test(code) && (await verifyPin(code, row.code_hash));
+  if (!matches) {
+    await db.prepare('UPDATE auth_codes SET attempts = attempts + 1 WHERE id = ?1').bind(row.id).run();
+    return { ok: false, reason: 'bad_code' };
+  }
+  await db.prepare('UPDATE auth_codes SET consumed = 1 WHERE id = ?1').bind(row.id).run();
+  return { ok: true, row };
+}
+
+/* ------------------------------------------------------------------ *
+ * Sessions
+ * ------------------------------------------------------------------ */
+
+const SESSION_KEY = 'session:';
+
+/**
+ * Sessions are signed tokens that carry a random id, and the id maps to the
+ * account in `kv`. That keeps them stateless to verify but revocable: signing
+ * out deletes the row, so a copied cookie stops working immediately.
+ */
+export async function resolveRequestUser(request: Request, env: Env): Promise<RequestUser | null> {
+  const sub = await sessionSubFromCookie(request, env);
+  if (!sub) return null;
+  const row = await env.DB!.prepare('SELECT * FROM users WHERE sub = ?1').bind(sub).first<UserRow>();
+  if (!row) return null;
+  return {
+    sub: row.sub,
+    provider: 'email',
+    email: row.email ?? undefined,
+    name: row.display_name ?? undefined,
+    picture: row.picture ?? undefined,
+  };
+}
+
 export async function issueSessionCookie(env: Env, sub: string): Promise<string> {
   const secret = env.APP_SECRET ?? 'dev-secret';
-  const token = await signOpaque(secret, `sess:${sub}`, SESSION_TTL_MS);
+  const sid = randomId(12);
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  if (env.DB) await kvSet(env.DB, `${SESSION_KEY}${sid}`, `${sub}|${expiresAt}`);
+  const token = await signOpaque(secret, `sess:${sid}`, SESSION_TTL_MS);
   return serializeCookie(SESSION_COOKIE, token, {
     maxAge: SESSION_TTL_MS,
     secure: env.APP_ORIGIN.startsWith('https://'),
@@ -132,10 +214,8 @@ export function clearSessionCookie(env: Env): string {
   return serializeCookie(SESSION_COOKIE, '', { secure: env.APP_ORIGIN.startsWith('https://') });
 }
 
-/**
- * Returns the raw session sub from the Google cookie when valid, else null.
- */
-export async function sessionSubFromCookie(request: Request, env: Env): Promise<string | null> {
+/** Session id from a valid cookie, or null. */
+async function sessionIdFromCookie(request: Request, env: Env): Promise<string | null> {
   if (!env.APP_SECRET) return null;
   const token = readCookie(request.headers.get('cookie'), SESSION_COOKIE);
   const payload = await verifyOpaque(env.APP_SECRET, token);
@@ -143,9 +223,36 @@ export async function sessionSubFromCookie(request: Request, env: Env): Promise<
   return payload.slice('sess:'.length);
 }
 
+/** Raw session sub when the cookie is valid and not revoked, else null. */
+export async function sessionSubFromCookie(request: Request, env: Env): Promise<string | null> {
+  if (!env.DB) return null;
+  const sid = await sessionIdFromCookie(request, env);
+  if (!sid) return null;
+  const stored = await kvGet(env.DB, `${SESSION_KEY}${sid}`);
+  if (!stored) return null;
+  const [sub, expiresAt] = stored.split('|');
+  if (!sub) return null;
+  if (Number(expiresAt) && Number(expiresAt) < Date.now()) {
+    await env.DB.prepare('DELETE FROM kv WHERE key = ?1').bind(`${SESSION_KEY}${sid}`).run();
+    return null;
+  }
+  return sub;
+}
+
+/** Delete the session behind this request so its cookie can never be replayed. */
+export async function revokeSession(env: Env, request: Request): Promise<void> {
+  if (!env.DB) return;
+  const sid = await sessionIdFromCookie(request, env);
+  if (!sid) return;
+  await env.DB.prepare('DELETE FROM kv WHERE key = ?1').bind(`${SESSION_KEY}${sid}`).run();
+}
+
 /* ------------------------------------------------------------------ *
- * PIN lock
+ * PIN lock (exactly 4 digits, archive style)
  * ------------------------------------------------------------------ */
+
+export const PIN_PATTERN = /^\d{4}$/;
+export const PIN_RULES = 'Use exactly 4 digits';
 
 export async function issuePinToken(env: Env, sub: string): Promise<string> {
   return signOpaque(env.APP_SECRET ?? 'dev-secret', `pin:${sub}`, PIN_TOKEN_TTL_MS);
@@ -161,134 +268,54 @@ export async function checkPinToken(
 }
 
 /* ------------------------------------------------------------------ *
- * Google OAuth (configured from Settings -> Authentication)
- * ------------------------------------------------------------------ */
-
-export type GoogleConfig = { clientId: string | null; configured: boolean };
-
-export async function getGoogleConfig(db: D1Database): Promise<GoogleConfig> {
-  const clientId = await kvGet(db, 'google_client_id');
-  return { clientId, configured: Boolean(clientId) };
-}
-
-export async function setGoogleConfig(
-  db: D1Database,
-  env: Env,
-  clientId: string,
-  clientSecret: string,
-): Promise<void> {
-  await kvSet(db, 'google_client_id', clientId.trim());
-  if (clientSecret.trim()) {
-    const packed = await encryptSecret(env.APP_SECRET ?? 'dev-secret', clientSecret.trim());
-    await kvSet(db, 'google_client_secret', packed);
-  }
-}
-
-export function buildGoogleAuthUrl(clientId: string, env: Env, state: string): string {
-  const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-  url.searchParams.set('client_id', clientId);
-  url.searchParams.set('redirect_uri', `${env.APP_ORIGIN}/auth/google/callback`);
-  url.searchParams.set('response_type', 'code');
-  url.searchParams.set('scope', 'openid email profile');
-  url.searchParams.set('state', state);
-  url.searchParams.set('prompt', 'select_account');
-  return url.toString();
-}
-
-export async function beginGoogleState(db: D1Database): Promise<string> {
-  const state = randomId(18);
-  await kvSet(db, `oauth_state:${state}`, String(Date.now() + GOOGLE_STATE_TTL_MS));
-  return state;
-}
-
-export async function consumeGoogleState(db: D1Database, state: string): Promise<boolean> {
-  if (!state || state.length > 128) return false;
-  const key = `oauth_state:${state}`;
-  const value = await kvGet(db, key);
-  if (!value) return false;
-  await db.prepare('DELETE FROM kv WHERE key = ?1').bind(key).run();
-  return Number(value) >= Date.now();
-}
-
-export async function exchangeGoogleCode(
-  db: D1Database,
-  env: Env,
-  code: string,
-): Promise<RequestUser> {
-  const clientId = await kvGet(db, 'google_client_id');
-  const packedSecret = await kvGet(db, 'google_client_secret');
-  if (!clientId) throw new Error('Google sign-in is not configured yet');
-  const clientSecret = packedSecret
-    ? await decryptSecret(env.APP_SECRET ?? 'dev-secret', packedSecret)
-    : '';
-
-  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      code,
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: `${env.APP_ORIGIN}/auth/google/callback`,
-      grant_type: 'authorization_code',
-    }),
-  });
-  if (!tokenRes.ok) {
-    throw new Error(`Google token exchange failed (HTTP ${tokenRes.status})`);
-  }
-  const tokens = (await tokenRes.json()) as { access_token?: string };
-  if (!tokens.access_token) throw new Error('Google returned no access token');
-
-  const infoRes = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
-    headers: { Authorization: `Bearer ${tokens.access_token}` },
-  });
-  if (!infoRes.ok) throw new Error(`Google userinfo failed (HTTP ${infoRes.status})`);
-  const info = (await infoRes.json()) as {
-    sub?: string;
-    email?: string;
-    name?: string;
-    picture?: string;
-  };
-  if (!info.sub) throw new Error('Google account has no subject');
-  return {
-    sub: `google:${info.sub}`,
-    provider: 'google',
-    email: info.email,
-    name: info.name,
-    picture: info.picture,
-  };
-}
-
-/* ------------------------------------------------------------------ *
  * User records + unique tags
  * ------------------------------------------------------------------ */
 
 export async function findUser(db: D1Database, sub: string): Promise<UserRow | null> {
   return db.prepare('SELECT * FROM users WHERE sub = ?1').bind(sub).first<UserRow>();
-}/**
-   * Upsert the account row, minting a unique @mindflayer-xxxxxx tag on first sign-in.
-   */
+}
+
+/**
+ * Upsert the account row, minting a unique @mindflayer-xxxxxx tag on first
+ * sign-in. `passwordHash` is only supplied by the email signup flow.
+ */
 export async function ensureUserRecord(
   db: D1Database,
   env: Env,
   ru: RequestUser,
+  opts: { passwordHash?: string | null; displayName?: string | null } = {},
 ): Promise<UserRow> {
   await ensureSchema(db);
   const existing = await findUser(db, ru.sub);
 
   if (existing) {
+    const passwordHash = opts.passwordHash ?? existing.password_hash;
     await db
       .prepare(
         `UPDATE users
            SET last_login_at = datetime('now'),
                email = ?2,
                display_name = ?3,
-               picture = ?4
+               picture = ?4,
+               password_hash = ?5
          WHERE sub = ?1`,
       )
-      .bind(ru.sub, ru.email ?? existing.email, ru.name ?? existing.display_name, ru.picture ?? existing.picture)
+      .bind(
+        ru.sub,
+        ru.email ?? existing.email,
+        ru.name ?? existing.display_name,
+        ru.picture ?? existing.picture,
+        passwordHash,
+      )
       .run();
-    const row = { ...existing };
+    const row = {
+      ...existing,
+      password_hash: passwordHash,
+      email: ru.email ?? existing.email,
+      display_name: ru.name ?? existing.display_name,
+      picture: ru.picture ?? existing.picture,
+      last_login_at: new Date().toISOString(),
+    };
     if (!row.welcomed) {
       try {
         await sendWelcome(env, db, row);
@@ -296,24 +323,27 @@ export async function ensureUserRecord(
         /* mail is best-effort */
       }
     }
-    return {
-      ...row,
-      email: ru.email ?? row.email,
-      display_name: ru.name ?? row.display_name,
-      picture: ru.picture ?? row.picture,
-      last_login_at: new Date().toISOString(),
-    };
+    return row;
   }
 
   let lastError: unknown = null;
-  for (let attempt = 0; attempt < 6; attempt++) {      const tag = randomTag();
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const tag = randomTag();
     try {
       await db
         .prepare(
-          `INSERT INTO users (sub, provider, tag, display_name, email, picture)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+          `INSERT INTO users (sub, provider, tag, display_name, email, picture, password_hash)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
         )
-        .bind(ru.sub, ru.provider, tag, ru.name ?? null, ru.email ?? null, ru.picture ?? null)
+        .bind(
+          ru.sub,
+          ru.provider,
+          tag,
+          ru.name ?? opts.displayName ?? null,
+          ru.email ?? null,
+          ru.picture ?? null,
+          opts.passwordHash ?? null,
+        )
         .run();
       const row = await findUser(db, ru.sub);
       if (row) {

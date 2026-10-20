@@ -1,6 +1,7 @@
 /**
- * Crypto primitives: AES-GCM secret storage, PBKDF2 PIN hashing and
- * HMAC-signed stateless tokens (Google session cookie, PIN unlock token).
+ * Crypto primitives: AES-GCM secret storage, PBKDF2 hashing for passwords,
+ * 6-digit email OTPs and the 4-digit PIN, plus HMAC-signed stateless tokens
+ * (session cookie, PIN unlock token).
  * Uses only Web Crypto, which runs identically in workerd and Node.
  */
 
@@ -78,7 +79,7 @@ async function aesKey(secret: string): Promise<CryptoKey> {
   return crypto.subtle.importKey('raw', digest, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 
-/** `v1.<iv b64url>.<ciphertext b64url>` — used for connector API keys and Google client secrets. */
+/** `v1.<iv b64url>.<ciphertext b64url>` — used for connector API keys. */
 export async function encryptSecret(secret: string, plaintext: string): Promise<string> {
   const key = await aesKey(secret);
   const iv = randomBytes(12);
@@ -100,9 +101,14 @@ export async function decryptSecret(secret: string, packed: string): Promise<str
   return td.decode(plain);
 }
 
-const PIN_ITERATIONS = 120_000;
+/**
+ * workerd caps PBKDF2 at 100,000 iterations, so anything higher throws at
+ * runtime even though Node accepts it. 100k SHA-256 iterations stays inside
+ * that limit and is plenty for a 4-digit PIN guarded by a 5-attempt budget.
+ */
+export const PIN_ITERATIONS = 100_000;
 
-/** `pbkdf2.<iterations>.<salt b64url>.<hash b64url>` */
+/** `pbkdf2.<iterations>.<salt b64url>.<hash b64url>` — passwords, OTPs and PINs. */
 export async function hashPin(pin: string, salt: Bytes = randomBytes(16)): Promise<string> {
   const material = await crypto.subtle.importKey('raw', te.encode(pin), 'PBKDF2', false, [
     'deriveBits',

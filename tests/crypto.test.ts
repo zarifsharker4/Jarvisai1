@@ -8,6 +8,7 @@ import {
   verifyOpaque,
   randomTag,
   randomId,
+  PIN_ITERATIONS,
 } from '../server/crypto';
 
 describe('secret encryption', () => {
@@ -33,7 +34,9 @@ describe('secret encryption', () => {
 describe('PIN hashing', () => {
   it('verifies the correct PIN and rejects a wrong one', async () => {
     const stored = await hashPin('4821');
-    expect(stored.startsWith('pbkdf2.120000.')).toBe(true);
+    // workerd caps PBKDF2 at 100k iterations; anything higher throws at runtime
+    expect(PIN_ITERATIONS).toBeLessThanOrEqual(100_000);
+    expect(stored.startsWith(`pbkdf2.${PIN_ITERATIONS}.`)).toBe(true);
     await expect(verifyPin('4821', stored)).resolves.toBe(true);
     await expect(verifyPin('4822', stored)).resolves.toBe(false);
   });

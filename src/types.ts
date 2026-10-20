@@ -19,8 +19,15 @@ export type VoiceProfile = {
 export type Bootstrap = {
   app: string;
   tagline: string;
-  freebuff: boolean;
-  google: { configured: boolean };
+  auth: {
+    method: string;
+    otpDigits: number;
+    otpMinutes: number;
+    pinDigits: number;
+    senderName: string;
+    senderAddress: string;
+    mailConfigured: boolean;
+  };
   providers: ProviderPreset[];
   agents: AgentProfile[];
   themes: Array<{ id: string; label: string }>;
@@ -40,7 +47,7 @@ export type ProviderPreset = {
 
 export type Me = {
   sub: string;
-  provider: 'freebuff' | 'google';
+  provider: 'email';
   tag: string;
   displayName: string | null;
   email: string | null;

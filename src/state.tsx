@@ -28,7 +28,8 @@ type AppState = {
   setTheme: (theme: string) => void;
   patchMe: (patch: Partial<Me>) => void;
   refreshChats: () => Promise<void>;
-  signOut: () => void;
+  refreshSession: () => Promise<void>;
+  signOut: () => Promise<void>;
 };
 
 const Ctx = createContext<AppState | null>(null);
@@ -80,6 +81,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  /** Pull the account behind the current session cookie (also used after OTP verify). */
+  const refreshSession = useCallback(async () => {
+    try {
+      const session = await api<{ user: Me }>('/api/me');
+      setMe(session.user);
+      const nextTheme = session.user.theme || 'mind-flayer-void';
+      applyTheme(nextTheme);
+      setThemeState(nextTheme);
+      await refreshChats();
+      return;
+    } catch (err) {
+      setMe(null);
+      if (err instanceof ApiError && err.status !== 401) setBanner(err.message);
+      throw err;
+    }
+  }, [refreshChats]);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -91,17 +109,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         /* bootstrap is best-effort */
       }
       try {
-        const session = await api<{ user: Me }>('/api/me');
-        if (cancelled) return;
-        setMe(session.user);
-        applyTheme(session.user.theme || 'mind-flayer-void');
-        setThemeState(session.user.theme || 'mind-flayer-void');
-        await refreshChats();
-      } catch (err) {
-        if (cancelled) return;
-        if (err instanceof ApiError && err.status !== 401) {
-          setBanner(err.message);
-        }
+        await refreshSession();
+      } catch {
         const saved = document.documentElement.dataset.theme;
         if (saved) applyTheme(saved);
       } finally {
@@ -111,7 +120,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [refreshChats]);
+  }, [refreshSession]);
 
   const setTheme = useCallback(
     (next: string) => {
@@ -143,23 +152,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const closePin = useCallback(() => setPinDialog(false), []);
 
   const signOut = useCallback(async () => {
-    const provider = me?.provider;
     try {
-      await api('/api/auth/google/signout', { method: 'POST', body: {} });
+      await api('/api/auth/signout', { method: 'POST', body: {} });
     } catch {
-      /* no google session */
+      /* the cookie may already be gone */
     }
     setPinToken(null);
-    if (provider === 'google') {
-      window.location.href = '/';
-      return;
-    }
-    const form = document.createElement('form');
-    form.method = 'post';
-    form.action = '/auth/signout';
-    document.body.appendChild(form);
-    form.submit();
-  }, [me]);
+    setMe(null);
+    setChats([]);
+    setActiveChatId(null);
+  }, []);
 
   const value = useMemo<AppState>(
     () => ({
@@ -180,6 +182,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setTheme,
       patchMe,
       refreshChats,
+      refreshSession,
       signOut,
     }),
     [
@@ -198,6 +201,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setTheme,
       patchMe,
       refreshChats,
+      refreshSession,
       signOut,
     ],
   );

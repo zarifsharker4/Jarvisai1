@@ -4,6 +4,7 @@ import { Chat } from './Chat';
 import { Call } from './Call';
 import { Settings } from './Settings';
 import { PinGate } from './PinGate';
+import { VecnaLogo } from './VecnaLogo';
 
 type View = 'chat' | 'call' | 'settings';
 
@@ -55,13 +56,8 @@ export function Shell() {
     <div className="app">
       <aside className="sidebar">
         <div className="sidebar-head">
-          <div className="brand-mark small">
-            <svg viewBox="0 0 48 48" aria-hidden="true" className="brand-icon-small">
-              <circle cx="24" cy="22" r="12" fill="currentColor" />
-              <path d="M24 8 a16 16 0 0 1 16 16 v4 a10 10 0 0 0 -10 -10 z" fill="color-mix(in srgb, currentColor 60%, transparent)" />
-              <circle cx="24" cy="22" r="5" fill="color-mix(in srgb, white 80%, transparent)" />
-              <circle cx="24" cy="22" r="2.6" fill="color-mix(in srgb, black 70%, transparent)" />
-            </svg>
+          <div className="brand-mark small vecna-mark">
+            <VecnaLogo size={30} className="brand-icon-small" />
           </div>
           <div>
             <div className="brand-name small">Mind Flayer</div>
@@ -125,7 +121,7 @@ export function Shell() {
             <div className="avatar">{(me?.tag ?? 'MF').slice(-2).toUpperCase()}</div>
             <div className="user-lines">
               <div className="user-tag">{me?.tag}</div>
-              <div className="user-mail">{me?.email ?? me?.provider}</div>
+              <div className="user-mail">{me?.email ?? 'email account'}</div>
             </div>
           </div>
           <button className="btn btn-ghost btn-sm" onClick={() => void signOut()}>

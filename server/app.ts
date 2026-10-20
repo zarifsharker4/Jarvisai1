@@ -1,21 +1,28 @@
 import { Hono } from 'hono';
 import { AGENTS, AGENT_ORDER } from './agents';
 import {
-  beginGoogleState,
-  buildGoogleAuthUrl,
   checkPinToken,
   clearSessionCookie,
-  consumeGoogleState,
+  codeJustIssued,
+  createAuthCode,
   ensureUserRecord,
-  exchangeGoogleCode,
-  getGoogleConfig,
+  findUserByEmail,
   issuePinToken,
   issueSessionCookie,
+  kvGet,
+  kvSet,
+  normalizeEmail,
+  passwordProblem,
+  PIN_PATTERN,
+  PIN_RULES,
   requireUser,
-  setGoogleConfig,
+  revokeSession,
+  subForEmail,
+  verifyAuthCode,
 } from './authz';
 import { encryptSecret, hashPin, randomId, verifyPin } from './crypto';
 import { guardSameOrigin, jsonError, PRIVATE_HEADERS } from './http';
+import { sendVecnaCode, VECNA_SENDER_ADDRESS, VECNA_SENDER_NAME } from './mail';
 import { PROVIDERS, providerById, testConnection, toClient } from './providers';
 import { DEFAULT_VOICES, listVoices } from './voice';
 import { aiRoutes } from './ai';
@@ -23,11 +30,12 @@ import { ensureSchema } from './schema';
 import type { AppDeps } from './deps';
 import type { ChatRow, ConnectorRow, Env, UserRow } from './types';
 
-const PIN_RULES = 'Use 4-12 digits';  /**
-   * The Mind Flayer backend: auth + PIN lock, unlimited API connectors,
-   * chat history, the 3-agent pipeline / discussion / call surfaces (ai.ts),
-   * settings, themes and the branded outbox.
-   */
+/**
+ * The Mind Flayer backend: email + password auth with 6-digit email codes,
+ * the 4-digit PIN lock, unlimited API connectors, chat history, the 3-agent
+ * pipeline / discussion / call surfaces (ai.ts), settings, themes and the
+ * Vecna-branded mail outbox.
+ */
 export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
   app.route('/', aiRoutes(deps));
@@ -40,22 +48,27 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
   );
 
   app.get('/api/bootstrap', async (c) => {
-    let googleConfigured = false;
+    // Provision the schema on first request of a fresh deployment.
     if (c.env.DB) {
       try {
         await ensureSchema(c.env.DB);
-        googleConfigured = (await getGoogleConfig(c.env.DB)).configured;
       } catch (err) {
         console.error(`[bootstrap] ${c.env.APP_ENV ?? 'app'}: ${(err as Error).message}`);
-        googleConfigured = false;
       }
     }
     return Response.json(
       {
         app: 'Mind Flayer',
         tagline: 'Mind Flayer · 3-agent collaborative coding',
-        freebuff: Boolean(c.env.FREEBUFF_CLIENT_ID),
-        google: { configured: googleConfigured },
+        auth: {
+          method: 'email+password',
+          otpDigits: 6,
+          otpMinutes: 10,
+          pinDigits: 4,
+          senderName: VECNA_SENDER_NAME,
+          senderAddress: VECNA_SENDER_ADDRESS,
+          mailConfigured: Boolean(c.env.KNOCK_API_KEY),
+        },
         providers: PROVIDERS,
         agents: AGENT_ORDER.map((id) => AGENTS[id]),
         themes: [
@@ -93,48 +106,272 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
   app.get('/api/providers', (c) => Response.json({ providers: PROVIDERS }, { headers: PRIVATE_HEADERS }));
 
   /* ---------------------------------------------------------------- *
-   * Google OAuth: start + callback (configured from Settings)
+   * Email + password auth with a 6-digit emailed code
    * ---------------------------------------------------------------- */
-  app.get('/auth/google/start', async (c) => {
-    if (!c.env.DB) return jsonError('Database not bound', 503);
-    await ensureSchema(c.env.DB);
-    const config = await getGoogleConfig(c.env.DB);
-    if (!config.clientId) return c.redirect('/?auth_error=not_configured', 302);
-    const state = await beginGoogleState(c.env.DB);
-    return c.redirect(buildGoogleAuthUrl(config.clientId, c.env, state), 302);
-  });
 
-  app.get('/auth/google/callback', async (c) => {
-    const url = new URL(c.req.url);
-    const code = url.searchParams.get('code');
-    const state = url.searchParams.get('state');
-    const oauthError = url.searchParams.get('error');
-    if (!c.env.DB) return c.redirect('/?auth_error=unavailable', 302);
-    await ensureSchema(c.env.DB);
-    if (oauthError || !code) return c.redirect('/?auth_error=denied', 302);
-    if (!state || !(await consumeGoogleState(c.env.DB, state))) {
-      return c.redirect('/?auth_error=state', 302);
-    }
+  type AuthBody = {
+    email?: string;
+    password?: string;
+    name?: string;
+    code?: string;
+    purpose?: string;
+  };
+
+  type Delivery = { status: string; provider: string; error?: string };
+
+  /**
+   * Delivery state for the client. The code itself is echoed back only outside
+   * production (local dev, tests, previews) and only when the mail never left
+   * the building — a production deploy without a provider fails closed instead
+   * of handing out codes, and the UI says the operator must set KNOCK_API_KEY.
+   */
+  function deliveryPayload(
+    c: { env: Env },
+    delivery: Delivery,
+    code: string,
+  ): Record<string, unknown> {
+    const canDeliver = Boolean(c.env.KNOCK_API_KEY);
+    const allowDevCode = (c.env.APP_ENV ?? 'local') !== 'production';
+    return {
+      delivery: delivery.status,
+      provider: delivery.provider,
+      error: delivery.error ?? null,
+      canDeliver,
+      ...(allowDevCode && delivery.status !== 'sent' ? { devCode: code } : {}),
+    };
+  }
+
+  async function issueCode(
+    c: { env: Env },
+    email: string,
+    purpose: 'signup' | 'login',
+    extra: { passwordHash?: string | null; displayName?: string | null },
+  ) {
+    const { code } = await createAuthCode(c.env.DB!, {
+      email,
+      purpose,
+      passwordHash: extra.passwordHash ?? null,
+      displayName: extra.displayName ?? null,
+    });
+    let delivery: Delivery = { status: 'outbox', provider: 'outbox' };
     try {
-      const ru = await exchangeGoogleCode(c.env.DB, c.env, code);
-      await ensureUserRecord(c.env.DB, c.env, ru);
-      const cookie = await issueSessionCookie(c.env, ru.sub);
-      return new Response(null, {
-        status: 303,
-        headers: { Location: '/', 'Set-Cookie': cookie },
-      });
+      // Filed under the account so the message is readable in Settings -> Outbox.
+      delivery = await sendVecnaCode(c.env, c.env.DB!, email, code, purpose, subForEmail(email));
     } catch (err) {
-      const detail = encodeURIComponent((err as Error).message.slice(0, 160));
-      return c.redirect(`/?auth_error=${detail}`, 302);
+      delivery = { status: 'failed', provider: 'outbox', error: (err as Error).message };
     }
-  });
+    return { code, delivery };
+  }
 
-  app.post('/api/auth/google/signout', (c) => {
+  app.post('/api/auth/signup', async (c) => {
+    if (!c.env.DB) return jsonError('Database not bound', 503);
     const sameOrigin = guardSameOrigin(c.req.raw, c.env);
     if (sameOrigin) return sameOrigin;
+    await ensureSchema(c.env.DB);
+
+    const body = (await c.req.json().catch(() => null)) as AuthBody | null;
+    const email = normalizeEmail(body?.email);
+    if (!email) return jsonError('Enter a valid email address', 400, { field: 'email' });
+    const pwProblem = passwordProblem(body?.password);
+    if (pwProblem) return jsonError(pwProblem, 400, { field: 'password' });
+
+    const existing = await findUserByEmail(c.env.DB, email);
+    if (existing?.password_hash) {
+      return jsonError('That email already has an account — sign in instead', 409, { reason: 'exists' });
+    }
+    if (await codeJustIssued(c.env.DB, email, 'signup')) {
+      return jsonError('A code was just sent. Give it a minute before asking for another', 429, {
+        reason: 'cooldown',
+      });
+    }
+
+    const name = body?.name?.trim().slice(0, 60) || null;
+    const { code, delivery } = await issueCode(c, email, 'signup', {
+      passwordHash: await hashPin(body!.password!),
+      displayName: name,
+    });
+
+    return Response.json(
+      {
+        ok: true,
+        email,
+        purpose: 'signup',
+        otpDigits: 6,
+        expiresInSeconds: 600,
+        ...deliveryPayload(c, delivery, code),
+      },
+      { headers: PRIVATE_HEADERS },
+    );
+  });
+
+  app.post('/api/auth/login', async (c) => {
+    if (!c.env.DB) return jsonError('Database not bound', 503);
+    const sameOrigin = guardSameOrigin(c.req.raw, c.env);
+    if (sameOrigin) return sameOrigin;
+    await ensureSchema(c.env.DB);
+
+    const body = (await c.req.json().catch(() => null)) as AuthBody | null;
+    const email = normalizeEmail(body?.email);
+    const password = typeof body?.password === 'string' ? body.password : '';
+    if (!email || !password) return jsonError('Email and password are required', 400);
+
+    const user = await findUserByEmail(c.env.DB, email);
+    const bad = () => jsonError('Email or password is incorrect', 401, { reason: 'bad_credentials' });
+    if (!user?.password_hash) {
+      // Spend the same PBKDF2 work so the response does not reveal which emails exist.
+      await hashPin(password);
+      return bad();
+    }
+    if (!(await verifyPin(password, user.password_hash))) return bad();
+    if (await codeJustIssued(c.env.DB, email, 'login')) {
+      return jsonError('A code was just sent. Give it a minute before asking for another', 429, {
+        reason: 'cooldown',
+      });
+    }
+
+    const { code, delivery } = await issueCode(c, email, 'login', {});
+    return Response.json(
+      {
+        ok: true,
+        email,
+        purpose: 'login',
+        otpDigits: 6,
+        expiresInSeconds: 600,
+        ...deliveryPayload(c, delivery, code),
+      },
+      { headers: PRIVATE_HEADERS },
+    );
+  });
+
+  app.post('/api/auth/resend', async (c) => {
+    if (!c.env.DB) return jsonError('Database not bound', 503);
+    const sameOrigin = guardSameOrigin(c.req.raw, c.env);
+    if (sameOrigin) return sameOrigin;
+    await ensureSchema(c.env.DB);
+
+    const body = (await c.req.json().catch(() => null)) as AuthBody | null;
+    const email = normalizeEmail(body?.email);
+    const purpose = body?.purpose === 'signup' ? 'signup' : 'login';
+    if (!email) return jsonError('Enter a valid email address', 400);
+
+    if (await codeJustIssued(c.env.DB, email, purpose)) {
+      return jsonError('A code was just sent. Give it a minute before asking for another', 429, {
+        reason: 'cooldown',
+      });
+    }
+
+    const previous = await c.env.DB.prepare(
+      'SELECT password_hash, display_name FROM auth_codes WHERE email = ?1 AND purpose = ?2 ORDER BY created_at DESC LIMIT 1',
+    )
+      .bind(email, purpose)
+      .first<{ password_hash: string | null; display_name: string | null }>();
+    if (purpose === 'signup' && !previous?.password_hash) {
+      return jsonError('Start the signup again — that request expired', 400, { reason: 'restart' });
+    }
+    if (purpose === 'login' && !(await findUserByEmail(c.env.DB, email))) {
+      return jsonError('Email or password is incorrect', 401, { reason: 'bad_credentials' });
+    }
+
+    const { code, delivery } = await issueCode(c, email, purpose, {
+      passwordHash: previous?.password_hash ?? null,
+      displayName: previous?.display_name ?? null,
+    });
+    return Response.json(
+      {
+        ok: true,
+        email,
+        purpose,
+        otpDigits: 6,
+        expiresInSeconds: 600,
+        ...deliveryPayload(c, delivery, code),
+      },
+      { headers: PRIVATE_HEADERS },
+    );
+  });
+
+  app.post('/api/auth/verify', async (c) => {
+    if (!c.env.DB) return jsonError('Database not bound', 503);
+    const sameOrigin = guardSameOrigin(c.req.raw, c.env);
+    if (sameOrigin) return sameOrigin;
+    await ensureSchema(c.env.DB);
+
+    const body = (await c.req.json().catch(() => null)) as AuthBody | null;
+    const email = normalizeEmail(body?.email);
+    const code = typeof body?.code === 'string' ? body.code.replace(/\D/g, '').slice(0, 6) : '';
+    const purpose = body?.purpose === 'signup' ? 'signup' : 'login';
+    if (!email) return jsonError('Enter a valid email address', 400);
+    if (code.length !== 6) return jsonError('Enter the 6-digit code from the email', 400, { field: 'code' });
+
+    const result = await verifyAuthCode(c.env.DB, email, code, purpose);
+    if (!result.ok) {
+      switch (result.reason) {
+        case 'too_many_attempts':
+          return jsonError('Too many wrong codes — request a new one', 429, { reason: 'too_many_attempts' });
+        case 'expired':
+        case 'no_code':
+          return jsonError('That code expired. Request a new one', 400, { reason: 'expired' });
+        default:
+          return jsonError('That code is not right', 400, { reason: 'bad_code' });
+      }
+    }
+
+    const sub = subForEmail(email);
+    if (purpose === 'signup') {
+      if (!result.row.password_hash) {
+        return jsonError('Start the signup again — that request expired', 400, { reason: 'restart' });
+      }
+      await ensureUserRecord(
+        c.env.DB,
+        c.env,
+        { sub, provider: 'email', email },
+        { passwordHash: result.row.password_hash, displayName: result.row.display_name },
+      );
+    } else {
+      const existing = await findUserByEmail(c.env.DB, email);
+      if (!existing) return jsonError('Email or password is incorrect', 401, { reason: 'bad_credentials' });
+      await ensureUserRecord(c.env.DB, c.env, { sub, provider: 'email', email });
+    }
+
+    const user = await findUserByEmail(c.env.DB, email);
+    const cookie = await issueSessionCookie(c.env, sub);
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        user: {
+          sub,
+          provider: 'email',
+          tag: user?.tag ?? null,
+          email,
+          displayName: user?.display_name ?? null,
+          pinEnabled: Boolean(user?.pin_hash),
+          theme: user?.theme ?? 'mind-flayer-void',
+        },
+      }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Set-Cookie': cookie, ...PRIVATE_HEADERS },
+      },
+    );
+  });
+
+  app.post('/api/auth/signout', async (c) => {
+    const sameOrigin = guardSameOrigin(c.req.raw, c.env);
+    if (sameOrigin) return sameOrigin;
+    await revokeSession(c.env, c.req.raw);
     return new Response(JSON.stringify({ ok: true }), {
       status: 200,
       headers: { 'Set-Cookie': clearSessionCookie(c.env), ...PRIVATE_HEADERS },
+    });
+  });
+
+  /** Form fallback so a plain POST (no fetch) can also end the session. */
+  app.post('/auth/signout', async (c) => {
+    const sameOrigin = guardSameOrigin(c.req.raw, c.env);
+    if (sameOrigin) return sameOrigin;
+    await revokeSession(c.env, c.req.raw);
+    return new Response(null, {
+      status: 303,
+      headers: { Location: '/', 'Set-Cookie': clearSessionCookie(c.env) },
     });
   });
 
@@ -149,7 +386,7 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
       {
         user: {
           sub: user.sub,
-          provider: user.provider,
+          provider: 'email',
           tag: user.tag,
           displayName: user.display_name,
           email: user.email,
@@ -175,7 +412,13 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
       displayName?: string;
       voiceProfile?: Record<string, unknown>;
     } | null;
-    const        allowedThemes = ['classic-dark', 'stranger-things', 'from-series', 'arc-reactor', 'cyberpunk', 'dracula', 'monokai', 'nord', 'gruvbox', 'tokyo-night', 'one-dark-pro', 'catppuccin-mocha', 'synthwave-84', 'matrix-green', 'solarized-dark', 'github-dark', 'midnight-blue', 'emerald-abyss', 'sunset-vibes', 'rose-pine', 'palenight', 'mind-flayer-void', 'vecna-curse', 'obsidian-gold', 'titanium-glass'];
+    const allowedThemes = [
+      'classic-dark', 'stranger-things', 'from-series', 'arc-reactor', 'cyberpunk', 'dracula',
+      'monokai', 'nord', 'gruvbox', 'tokyo-night', 'one-dark-pro', 'catppuccin-mocha',
+      'synthwave-84', 'matrix-green', 'solarized-dark', 'github-dark', 'midnight-blue',
+      'emerald-abyss', 'sunset-vibes', 'rose-pine', 'palenight', 'mind-flayer-void',
+      'vecna-curse', 'obsidian-gold', 'titanium-glass',
+    ];
     const updates: string[] = [];
     const values: unknown[] = [];
     if (body?.theme && allowedThemes.includes(body.theme)) {
@@ -200,20 +443,43 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
   });
 
   /* ---------------------------------------------------------------- *
-   * PIN lock for chat history
+   * 4-digit PIN lock for chat history
    * ---------------------------------------------------------------- */
+  const PIN_LOCK_AFTER = 5;
+  const PIN_LOCK_MS = 15 * 60 * 1000;
+
+  async function pinLockRemaining(env: Env, sub: string): Promise<number> {
+    const raw = await kvGet(env.DB!, `pin_lock:${sub}`);
+    if (!raw) return 0;
+    const [failsRaw, untilRaw] = raw.split(':');
+    const fails = Number(failsRaw) || 0;
+    const until = Number(untilRaw) || 0;
+    if (fails < PIN_LOCK_AFTER) return 0;
+    return Math.max(0, until - Date.now());
+  }
+
+  async function penalisePin(env: Env, sub: string): Promise<number> {
+    const raw = await kvGet(env.DB!, `pin_lock:${sub}`);
+    const [failsRaw] = (raw ?? '').split(':');
+    const fails = (Number(failsRaw) || 0) + 1;
+    const until = fails >= PIN_LOCK_AFTER ? Date.now() + PIN_LOCK_MS : 0;
+    await kvSet(env.DB!, `pin_lock:${sub}`, `${fails}:${until}`);
+    return fails >= PIN_LOCK_AFTER ? Math.ceil((until - Date.now()) / 60000) : 0;
+  }
+
   app.post('/api/pin/set', async (c) => {
     const gate = await requireUser(c.req.raw, c.env, deps);
     if (!gate.ok) return gate.response;
     const sameOrigin = guardSameOrigin(c.req.raw, c.env);
     if (sameOrigin) return sameOrigin;
     const body = (await c.req.json().catch(() => null)) as { pin?: string } | null;
-    const pin = body?.pin ?? '';
-    if (!/^\d{4,12}$/.test(pin)) return jsonError(`Invalid PIN. ${PIN_RULES}`, 400);
+    const pin = (body?.pin ?? '').trim();
+    if (!PIN_PATTERN.test(pin)) return jsonError(`Invalid PIN. ${PIN_RULES}`, 400, { field: 'pin' });
     const hashed = await hashPin(pin);
     await c.env.DB!.prepare('UPDATE users SET pin_hash = ?2 WHERE sub = ?1')
       .bind(gate.user.sub, hashed)
       .run();
+    await kvSet(c.env.DB!, `pin_lock:${gate.user.sub}`, '0:0');
     const token = await issuePinToken(c.env, gate.user.sub);
     return Response.json({ ok: true, token, pinEnabled: true }, { headers: PRIVATE_HEADERS });
   });
@@ -223,10 +489,27 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
     if (!gate.ok) return gate.response;
     const sameOrigin = guardSameOrigin(c.req.raw, c.env);
     if (sameOrigin) return sameOrigin;
-    const body = (await c.req.json().catch(() => null)) as { pin?: string } | null;
     if (!gate.user.pin_hash) return jsonError('No PIN is set', 400);
-    const ok = await verifyPin(body?.pin ?? '', gate.user.pin_hash);
-    if (!ok) return jsonError('Wrong PIN', 403, { reason: 'bad_pin' });
+
+    const lockedFor = await pinLockRemaining(c.env, gate.user.sub);
+    if (lockedFor > 0) {
+      return jsonError(`Too many wrong PINs. Try again in ${Math.ceil(lockedFor / 60000)} minutes`, 429, {
+        reason: 'pin_locked',
+      });
+    }
+
+    const body = (await c.req.json().catch(() => null)) as { pin?: string } | null;
+    const pin = (body?.pin ?? '').trim();
+    const ok = PIN_PATTERN.test(pin) && (await verifyPin(pin, gate.user.pin_hash));
+    if (!ok) {
+      const minutes = await penalisePin(c.env, gate.user.sub);
+      return jsonError(
+        minutes > 0 ? `Too many wrong PINs. Locked for ${minutes} minutes` : 'Wrong PIN',
+        minutes > 0 ? 429 : 403,
+        { reason: minutes > 0 ? 'pin_locked' : 'bad_pin' },
+      );
+    }
+    await kvSet(c.env.DB!, `pin_lock:${gate.user.sub}`, '0:0');
     const token = await issuePinToken(c.env, gate.user.sub);
     return Response.json({ ok: true, token }, { headers: PRIVATE_HEADERS });
   });
@@ -238,12 +521,23 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
     if (sameOrigin) return sameOrigin;
     const body = (await c.req.json().catch(() => null)) as { pin?: string } | null;
     if (gate.user.pin_hash) {
-      const ok = await verifyPin(body?.pin ?? '', gate.user.pin_hash);
-      if (!ok) return jsonError('Wrong PIN', 403, { reason: 'bad_pin' });
+      const lockedFor = await pinLockRemaining(c.env, gate.user.sub);
+      if (lockedFor > 0) {
+        return jsonError(`Too many wrong PINs. Try again in ${Math.ceil(lockedFor / 60000)} minutes`, 429, {
+          reason: 'pin_locked',
+        });
+      }
+      const pin = (body?.pin ?? '').trim();
+      const ok = PIN_PATTERN.test(pin) && (await verifyPin(pin, gate.user.pin_hash));
+      if (!ok) {
+        await penalisePin(c.env, gate.user.sub);
+        return jsonError('Wrong PIN', 403, { reason: 'bad_pin' });
+      }
     }
     await c.env.DB!.prepare('UPDATE users SET pin_hash = NULL WHERE sub = ?1')
       .bind(gate.user.sub)
       .run();
+    await kvSet(c.env.DB!, `pin_lock:${gate.user.sub}`, '0:0');
     return Response.json({ ok: true, pinEnabled: false }, { headers: PRIVATE_HEADERS });
   });
 
@@ -530,31 +824,26 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
   });
 
   /* ---------------------------------------------------------------- *
-   * Settings: Google OAuth credentials, voices, mail outbox
+   * Settings: session info, voices, mail outbox
    * ---------------------------------------------------------------- */
   app.get('/api/settings/auth', async (c) => {
     const gate = await requireUser(c.req.raw, c.env, deps);
     if (!gate.ok) return gate.response;
-    const google = await getGoogleConfig(c.env.DB!);
     return Response.json(
       {
-        freebuff: { enabled: Boolean(c.env.FREEBUFF_CLIENT_ID), issuer: c.env.FREEBUFF_ISSUER ?? null },
-        google: { configured: google.configured, clientId: google.clientId },
+        email: gate.user.email,
+        passwordSet: Boolean(gate.user.password_hash),
+        pinDigits: 4,
+        sender: {
+          name: VECNA_SENDER_NAME,
+          address: VECNA_SENDER_ADDRESS,
+          avatar: `${c.env.APP_ORIGIN.replace(/\/+$/, '')}/brand/vecna-avatar.png`,
+          mailConfigured: Boolean(c.env.KNOCK_API_KEY),
+        },
         session: { origin: c.env.APP_ORIGIN },
       },
       { headers: PRIVATE_HEADERS },
     );
-  });
-
-  app.post('/api/settings/google', async (c) => {
-    const gate = await requireUser(c.req.raw, c.env, deps);
-    if (!gate.ok) return gate.response;
-    const sameOrigin = guardSameOrigin(c.req.raw, c.env);
-    if (sameOrigin) return sameOrigin;
-    const body = (await c.req.json().catch(() => null)) as { clientId?: string; clientSecret?: string } | null;
-    if (!body?.clientId?.trim()) return jsonError('Google OAuth client ID is required', 400);
-    await setGoogleConfig(c.env.DB!, c.env, body.clientId, body.clientSecret ?? '');
-    return Response.json({ ok: true, configured: true }, { headers: PRIVATE_HEADERS });
   });
 
   app.get('/api/outbox', async (c) => {

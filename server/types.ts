@@ -30,17 +30,16 @@ export interface Fetcher {
 export interface Env {
   DB?: D1Database;
   ASSETS?: Fetcher;
-  /** Public, injected on deploy by the platform. */
-  FREEBUFF_CLIENT_ID?: string;
-  FREEBUFF_ISSUER?: string;
   APP_ORIGIN: string;
-  /** Keep TEST builds happy when env names drift. */
-  MINDFLOAYER_CLIENT_ID?: string;
-  MINDFLOAYER_ISSUER?: string;
-  /** Server-side secret used for PIN hashing, connector key encryption and cookies. */
+  /** Server-side secret used for password/OTP/PIN hashing, key encryption and cookies. */
   APP_SECRET?: string;
   APP_ENV?: string;
-  /** Optional Mind Flayer branded mail delivery (Knock workflow trigger). */
+  /**
+   * From header for Vecna mail. Must be on a domain verified with the mail
+   * provider, e.g. `Vecna from Mind Flayer <vecna@yourdomain.com>`.
+   */
+  MAIL_FROM?: string;
+  /** Optional Vecna-branded mail delivery through a Knock workflow trigger. */
   KNOCK_API_KEY?: string;
   KNOCK_WORKFLOW?: string;
   /** Optional server-wide ElevenLabs key; per-user connector key is preferred. */
@@ -48,9 +47,9 @@ export interface Env {
 }
 
 export type RequestUser = {
-  /** Primary key: freebuff `sub`, or `google:<sub>` for Google accounts. */
+  /** Primary key: `email:<normalized email>` for every Mind Flayer account. */
   sub: string;
-  provider: 'freebuff' | 'google';
+  provider: 'email';
   email?: string;
   name?: string;
   picture?: string;
@@ -63,12 +62,26 @@ export type UserRow = {
   display_name: string | null;
   email: string | null;
   picture: string | null;
+  password_hash: string | null;
   pin_hash: string | null;
   theme: string;
   voice_profile: string | null;
   welcomed: number;
   created_at: string;
   last_login_at: string;
+};
+
+export type AuthCodeRow = {
+  id: string;
+  email: string;
+  purpose: string;
+  code_hash: string;
+  password_hash: string | null;
+  display_name: string | null;
+  attempts: number;
+  consumed: number;
+  expires_at: string;
+  created_at: string;
 };
 
 export type ConnectorRow = {

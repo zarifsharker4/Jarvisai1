@@ -5,8 +5,10 @@ import { THEMES } from './Shell';
 import type { AgentId, Connector, MailItem, ProviderPreset } from '../types';
 
 type AuthSettings = {
-  freebuff: { enabled: boolean; issuer: string | null };
-  google: { configured: boolean; clientId: string | null };
+  email: string | null;
+  passwordSet: boolean;
+  pinDigits: number;
+  sender: { name: string; address: string; avatar: string; mailConfigured: boolean };
   session: { origin: string };
 };
 
@@ -16,8 +18,9 @@ type VoiceResponse = {
   note?: string;
 };
 
-/** Settings: account + theme (25 themes), PIN lock, the unlimited API connector registry,
- * per-agent voices, Google OAuth credentials, and the branded mail outbox. */
+/** Settings: account + theme (25 themes), the 4-digit PIN lock, the unlimited API
+ * connector registry, per-agent voices, the email account + Vecna sender, and
+ * the branded mail outbox. */
 export function Settings() {
   const { me, patchMe, bootstrap, theme, setTheme, requestUnlock } = useApp();
   const [section, setSection] = useState<'account' | 'security' | 'connectors' | 'voice' | 'auth' | 'mail'>('account');
@@ -53,7 +56,7 @@ export function Settings() {
           <h3>Account</h3>
           <div className="kv">
             <div><span className="k">Unique tag</span><span className="v mono">{me?.tag}</span></div>
-            <div><span className="k">Signed in with</span><span className="v">{me?.provider === 'google' ? 'Google' : 'Mind Flayer'}</span></div>
+            <div><span className="k">Signed in with</span><span className="v">Email + password</span></div>
             <div><span className="k">Email</span><span className="v">{me?.email ?? '—'}</span></div>
             <div><span className="k">Account ID</span><span className="v mono small">{me?.sub}</span></div>
             <div><span className="k">Member since</span><span className="v">{me?.createdAt?.slice(0, 10) ?? '—'}</span></div>
@@ -162,8 +165,9 @@ function PinSection({ requestUnlock }: { requestUnlock: () => void }) {
     <section className="panel">
       <h3>PIN lock</h3>
       <p className="muted">
-        A PIN hashes with PBKDF2 (120k iterations) on the server and gates every read of your chat history.
-        Unlocking issues a 12-hour session token on this device.
+        The PIN is exactly 4 digits, hashed with PBKDF2 (100k iterations) on the server, and gates every
+        read of your chat history and workspace. Unlocking issues a 12-hour token on this device; five
+        wrong attempts lock it for 15 minutes.
       </p>
       <div className="kv">
         <div>
@@ -173,18 +177,18 @@ function PinSection({ requestUnlock }: { requestUnlock: () => void }) {
       </div>
       <form className="inline-form" onSubmit={enabled ? (e) => { e.preventDefault(); void disable(); } : submit}>
         <label className="field">
-          <span>{enabled ? 'Enter current PIN to remove' : 'Choose a PIN (4-12 digits)'}</span>
+          <span>{enabled ? 'Enter current PIN to remove' : 'Choose a 4-digit PIN'}</span>
           <input
             className="input pin-input"
             type="password"
             inputMode="numeric"
-            maxLength={12}
+            maxLength={4}
             value={pin}
-            onChange={(e) => setPin(e.target.value.replace(/\\D/g, ''))}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
             placeholder="••••"
           />
         </label>
-        <button className="btn btn-primary" type="submit" disabled={busy || pin.length < 4}>
+        <button className="btn btn-primary" type="submit" disabled={busy || pin.length !== 4}>
           {enabled ? 'Remove PIN' : 'Set PIN'}
         </button>
       </form>
@@ -531,53 +535,34 @@ function defaultVoice(agent: AgentId): import('../types').VoiceProfile {
 /* ------------------------------------------------------------------ */
 
 function AuthSection() {
+  const { me } = useApp();
   const [settings, setSettings] = useState<AuthSettings | null>(null);
-  const [clientId, setClientId] = useState('');
-  const [clientSecret, setClientSecret] = useState('');
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     void api<AuthSettings>('/api/settings/auth')
-      .then((s) => {
-        setSettings(s);
-        setClientId(s.google.clientId ?? '');
-      })
+      .then(setSettings)
       .catch(() => undefined);
   }, []);
 
-  const save = async (event: FormEvent) => {
-    event.preventDefault();
-    setError(null);
-    setMessage(null);
-    try {
-      await api('/api/settings/google', {
-        method: 'POST',
-        body: { clientId: clientId.trim(), clientSecret: clientSecret.trim() },
-      });
-      setClientSecret('');
-      setMessage('Google OAuth saved — the "Sign in with Google" button is now live on the sign-in screen.');
-      setSettings((s) => (s ? { ...s, google: { configured: true, clientId: clientId.trim() } } : s));
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save credentials');
-    }
-  };
-
   return (
     <section className="panel">
-      <h3>Authentication</h3>
+      <h3>How you sign in</h3>
       <div className="kv">
         <div>
-          <span className="k">Sign in with Mind Flayer</span>
-          <span className={`v ${settings?.freebuff.enabled ? 'ok' : ''}`}>
-            {settings?.freebuff.enabled ? '✓ enabled' : 'checking…'}
-          </span>
+          <span className="k">Method</span>
+          <span className="v ok">✓ Email + password</span>
         </div>
         <div>
-          <span className="k">Google OAuth</span>
-          <span className={`v ${settings?.google.configured ? 'ok' : ''}`}>
-            {settings?.google.configured ? `✓ configured (${settings.google.clientId})` : 'not configured'}
-          </span>
+          <span className="k">Account email</span>
+          <span className="v mono">{settings?.email ?? me?.email ?? '—'}</span>
+        </div>
+        <div>
+          <span className="k">Password</span>
+          <span className="v">{settings?.passwordSet ? '✓ set' : 'not set'}</span>
+        </div>
+        <div>
+          <span className="k">Second step</span>
+          <span className="v">6-digit code emailed on every sign-in</span>
         </div>
         <div>
           <span className="k">Canonical origin</span>
@@ -586,41 +571,31 @@ function AuthSection() {
       </div>
 
       <p className="muted">
-        Google sign-in uses the authorization-code flow with PKCE-free state verification on this server. Create an
-        OAuth client (Web) in Google Cloud Console with callback
-        <code className="inline-code"> {settings?.session.origin ?? ''}/auth/google/callback</code>, then paste the
-        credentials below. They are stored encrypted and never sent to the browser.
+        Accounts live in your own D1 database. There is no third-party identity provider, no client ID
+        to paste and no OAuth callback to register: password first, then a 6-digit code that proves the
+        mailbox.
       </p>
 
-      <form className="connector-form" onSubmit={save}>
-        <label className="field">
-          <span>Google OAuth client ID</span>
-          <input
-            className="input mono"
-            placeholder="1234567890-abc.apps.googleusercontent.com"
-            value={clientId}
-            onChange={(e) => setClientId(e.target.value)}
-          />
-        </label>
-        <label className="field">
-          <span>Google OAuth client secret</span>
-          <input
-            className="input mono"
-            type="password"
-            autoComplete="off"
-            placeholder="GOCSPX-…"
-            value={clientSecret}
-            onChange={(e) => setClientSecret(e.target.value)}
-          />
-        </label>
-        <div className="form-row">
-          <button className="btn btn-primary" type="submit" disabled={!clientId.trim()}>
-            Save Google credentials
-          </button>
+      <h3>Vecna mail sender</h3>
+      <div className="vecna-sender-card">
+        <img className="vecna-sender-avatar" src="/brand/vecna-avatar.png" alt="Vecna" width={48} height={48} />
+        <div>
+          <div className="vecna-sender-name">{settings?.sender.name ?? 'Vecna from Mind Flayer'}</div>
+          <div className="mono small muted">{settings?.sender.address ?? 'vecna@mindflayer.ai'}</div>
+          <div className={`v ${settings?.sender.mailConfigured ? 'ok' : ''}`}>
+            {settings?.sender.mailConfigured
+              ? '✓ delivery provider configured'
+              : 'no provider key — codes render in the Mail outbox only'}
+          </div>
         </div>
-      </form>
-      {message ? <div className="inline-note">{message}</div> : null}
-      {error ? <div className="form-error">{error}</div> : null}
+      </div>
+      <p className="muted">
+        Every code mail is sent as <strong>Vecna from Mind Flayer</strong> and carries the crimson
+        sigil in the body. Add <code className="inline-code">KNOCK_API_KEY</code> (and a verified
+        sender domain via <code className="inline-code">MAIL_FROM</code>) to deliver for real. Inbox
+        avatars for a brand-new sender are chosen by the recipient&apos;s mail client, so the sigil also
+        ships inside the message itself.
+      </p>
     </section>
   );
 }

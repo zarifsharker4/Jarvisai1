@@ -6,8 +6,10 @@ import type { D1Database } from './types';
  *
  * Statements are executed through `batch()`, not `exec()`: D1's exec() splits
  * input on newlines, which breaks multi-line CREATE TABLE statements.
+ * Column additions for pre-existing databases run individually so one
+ * "duplicate column name" cannot abort the rest of the migration.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 const STATEMENTS: string[] = [
   `CREATE TABLE IF NOT EXISTS kv (
@@ -22,6 +24,7 @@ const STATEMENTS: string[] = [
      display_name TEXT,
      email TEXT,
      picture TEXT,
+     password_hash TEXT,
      pin_hash TEXT,
      theme TEXT NOT NULL DEFAULT 'mind-flayer-void',
      voice_profile TEXT,
@@ -29,6 +32,20 @@ const STATEMENTS: string[] = [
      created_at TEXT NOT NULL DEFAULT (datetime('now')),
      last_login_at TEXT NOT NULL DEFAULT (datetime('now'))
    )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
+  `CREATE TABLE IF NOT EXISTS auth_codes (
+     id TEXT PRIMARY KEY,
+     email TEXT NOT NULL,
+     purpose TEXT NOT NULL,
+     code_hash TEXT NOT NULL,
+     password_hash TEXT,
+     display_name TEXT,
+     attempts INTEGER NOT NULL DEFAULT 0,
+     consumed INTEGER NOT NULL DEFAULT 0,
+     expires_at TEXT NOT NULL,
+     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_auth_codes_lookup ON auth_codes(email, purpose, created_at DESC)`,
   `CREATE TABLE IF NOT EXISTS chats (
      id TEXT PRIMARY KEY,
      user_sub TEXT NOT NULL,
@@ -80,6 +97,12 @@ const STATEMENTS: string[] = [
    )`,
 ];
 
+/** Additive migrations for databases created before a column existed. */
+const MIGRATIONS: string[] = [
+  `ALTER TABLE users ADD COLUMN password_hash TEXT`,
+  `ALTER TABLE users ADD COLUMN pin_hash TEXT`,
+];
+
 const schemaReady = new WeakSet<D1Database>();
 
 export async function ensureSchema(db: D1Database): Promise<void> {
@@ -97,6 +120,13 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   }
 
   await db.batch(STATEMENTS.map((sql) => db.prepare(sql)));
+  for (const sql of MIGRATIONS) {
+    try {
+      await db.prepare(sql).run();
+    } catch {
+      /* column already exists on this database */
+    }
+  }
   await db
     .prepare(
       "INSERT INTO kv (key, value) VALUES ('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",

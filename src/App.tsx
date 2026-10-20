@@ -2,34 +2,36 @@ import { useEffect } from 'react';
 import { useApp } from './state';
 import { Login } from './components/Login';
 import { Shell } from './components/Shell';
+import { VecnaLogo } from './components/VecnaLogo';
 
 export default function App() {
   const { ready, me, banner, setBanner } = useApp();
 
-  const authError = new URLSearchParams(window.location.search).get('auth_error');
+  // Drop stale query strings from old links rather than showing them.
   useEffect(() => {
-    if (authError) {
-      const clean = window.location.pathname + window.location.hash;
-      window.history.replaceState({}, '', clean);
+    const url = new URL(window.location.href);
+    if (url.search) {
+      url.search = '';
+      window.history.replaceState({}, '', url.pathname + url.hash);
     }
-  }, [authError]);
+  }, []);
 
   if (!ready) {
     return (
       <div className="boot">
-        <div className="boot-mark">J</div>
+        <div className="boot-mark vecna-boot">
+          <VecnaLogo size={64} />
+        </div>
         <div className="boot-text">Mind Flayer is coming online…</div>
       </div>
     );
   }
 
-  const notice = authError ? describeAuthError(authError) : banner;
-
   return (
     <>
-      {notice ? (
+      {banner ? (
         <div className="top-banner" role="status">
-          <span>{notice}</span>
+          <span>{banner}</span>
           <button className="banner-close" onClick={() => setBanner(null)} aria-label="Dismiss">
             ×
           </button>
@@ -38,19 +40,4 @@ export default function App() {
       {me ? <Shell /> : <Login />}
     </>
   );
-}
-
-function describeAuthError(code: string): string {
-  switch (code) {
-    case 'not_configured':
-      return 'Google sign-in is not configured yet — add your Google OAuth client ID in Settings → Authentication.';
-    case 'state':
-      return 'Google sign-in could not be verified (expired or reused link). Please try again.';
-    case 'denied':
-      return 'Google sign-in was cancelled or denied.';
-    case 'unavailable':
-      return 'Authentication service is temporarily unavailable.';
-    default:
-      return `Sign-in failed: ${decodeURIComponent(code)}`;
-  }
 }

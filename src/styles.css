@@ -1162,69 +1162,6 @@ a {
   margin-bottom: 22px;
 }
 
-.btn-google {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  width: 100%;
-  padding: 14px 18px;
-  font-weight: 600;
-  font-size: 15px;
-  color: #1f1f1f;
-  background: #ffffff;
-  border: 1px solid #dadce0;
-  border-radius: 10px;
-  text-decoration: none;
-  transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease;
-  box-shadow: 0 1px 2px rgba(60, 64, 67, 0.08);
-}
-
-.btn-google:hover {
-  background: color-mix(in srgb, #ffffff 96%, #ececee);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 10px rgba(60, 64, 67, 0.16);
-}
-
-.btn-google:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
-}
-
-.btn-google span {
-  color: #1f1f1f;
-}
-
-.btn-google-outline {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  width: 100%;
-  padding: 13px 18px;
-  font-weight: 600;
-  font-size: 15px;
-  color: #e8eaed;
-  background: transparent;
-  border: 1px solid color-mix(in srgb, #dadce0 80%, transparent);
-  border-radius: 10px;
-  text-decoration: none;
-  transition: background 120ms ease, border-color 120ms ease;
-}
-
-.btn-google-outline:hover {
-  background: color-mix(in srgb, #ffffff 8%, transparent);
-  border-color: color-mix(in srgb, #ffffff 55%, transparent);
-}
-
-.btn-google-outline:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
-}
-
-.btn-google-outline span {
-  color: #e8eaed;
-}
 
 .landing-points {
   list-style: none;
@@ -2168,3 +2105,273 @@ a {
   border-radius: 10px;
   display: inline-block;
 }
+
+/* ------------------------------------------------------------------ *
+ * Vecna sigil (logo, hero, PIN lock, mail identity)
+ * ------------------------------------------------------------------ */
+
+.vecna-logo {
+  display: block;
+  overflow: visible;
+  filter: drop-shadow(0 0 8px rgba(255, 29, 60, 0.55)) drop-shadow(0 0 24px rgba(190, 0, 30, 0.35));
+}
+
+.vecna-blades {
+  transform-origin: 32px 32px;
+  animation: vecna-turn 46s linear infinite;
+}
+
+@keyframes vecna-turn {
+  to { transform: rotate(360deg); }
+}
+
+.vecna-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.vecna-hero {
+  position: absolute;
+  width: 40vmin;
+  height: 40vmin;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: vecna-breathe 6s ease-in-out infinite;
+}
+
+.vecna-hero-sigil {
+  width: 100%;
+  height: 100%;
+}
+
+@keyframes vecna-breathe {
+  0%, 100% { opacity: 0.72; filter: drop-shadow(0 0 18px rgba(255, 29, 60, 0.45)); }
+  50% { opacity: 1; filter: drop-shadow(0 0 46px rgba(255, 29, 60, 0.75)); }
+}
+
+.vecna-boot .vecna-logo {
+  filter: drop-shadow(0 0 18px rgba(255, 29, 60, 0.7));
+}
+
+.vecna-lock {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ------------------------------------------------------------------ *
+ * Email + password auth
+ * ------------------------------------------------------------------ */
+
+.auth-switch {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid color-mix(in srgb, var(--c-accent) 22%, transparent);
+  border-radius: 12px;
+}
+
+.auth-tab {
+  flex: 1;
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #9fb0c9;
+  font-weight: 600;
+  font-size: 13.5px;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.auth-tab:hover { color: #e8eefc; }
+
+.auth-tab.active {
+  background: color-mix(in srgb, var(--c-accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--c-accent) 45%, transparent);
+  color: #fff;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.auth-form .field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.auth-form .field > span {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #8d9bb2;
+}
+
+.auth-submit {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.auth-notice {
+  font-size: 13px;
+  color: #bfe6c9;
+  background: rgba(40, 160, 90, 0.12);
+  border: 1px solid rgba(60, 190, 110, 0.35);
+  border-radius: 10px;
+  padding: 9px 12px;
+}
+
+.auth-devcode {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #ffd9a8;
+  background: rgba(255, 150, 40, 0.1);
+  border: 1px dashed rgba(255, 170, 70, 0.45);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.dev-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.32em;
+  font-weight: 700;
+  color: #fff;
+}
+
+.auth-links {
+  display: flex;
+  justify-content: center;
+  margin-top: 14px;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: color-mix(in srgb, var(--c-accent) 80%, white);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.link-btn:disabled { color: #6d7a8d; cursor: default; }
+
+.auth-back {
+  background: none;
+  border: none;
+  color: #93a2b8;
+  font-size: 12.5px;
+  cursor: pointer;
+  padding: 0;
+  margin-bottom: 12px;
+}
+
+.auth-step-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.auth-avatar {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 45%, rgba(255, 45, 75, 0.3), rgba(10, 4, 8, 0.9));
+  border: 1px solid rgba(255, 45, 75, 0.4);
+}
+
+.auth-sender { font-weight: 700; color: #f4ecf1; font-size: 14px; }
+.auth-sender-mail { font-size: 11.5px; color: #8b7b86; }
+.auth-title { margin: 0 0 8px; font-size: 19px; color: #f6eef3; }
+.auth-copy { margin: 0 0 16px; font-size: 14px; line-height: 1.6; color: #c3b6c0; }
+
+.otp-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 24px;
+  letter-spacing: 0.5em;
+  text-align: center;
+  padding: 14px 10px;
+}
+
+.auth-step .form-error { font-size: 12.5px; }
+
+/* ------------------------------------------------------------------ *
+ * 4-digit PIN gate (archive style)
+ * ------------------------------------------------------------------ */
+
+.pin-modal.shake { animation: pin-shake 380ms ease; }
+
+@keyframes pin-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-8px); }
+  40% { transform: translateX(7px); }
+  60% { transform: translateX(-5px); }
+  80% { transform: translateX(3px); }
+}
+
+.pin-boxes {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  margin: 18px 0 6px;
+}
+
+.pin-box {
+  width: 56px;
+  height: 66px;
+  text-align: center;
+  font-size: 26px;
+  font-weight: 700;
+  color: #fdf2f5;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid color-mix(in srgb, var(--c-accent) 35%, transparent);
+  border-radius: 12px;
+  outline: none;
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.pin-box:focus {
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-accent) 25%, transparent);
+  transform: translateY(-1px);
+}
+
+.pin-boxes.busy { opacity: 0.7; }
+
+/* ------------------------------------------------------------------ *
+ * Vecna sender card (Settings -> Authentication)
+ * ------------------------------------------------------------------ */
+
+.vecna-sender-card {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 14px 16px;
+  margin: 10px 0 14px;
+  border: 1px solid color-mix(in srgb, var(--c-accent) 22%, transparent);
+  border-radius: 14px;
+  background:
+    radial-gradient(120% 140% at 0% 0%, rgba(255, 45, 75, 0.12), transparent 60%),
+    rgba(255, 255, 255, 0.02);
+}
+
+.vecna-sender-avatar {
+  border-radius: 50%;
+  border: 1px solid rgba(255, 45, 75, 0.45);
+  box-shadow: 0 0 18px rgba(255, 45, 75, 0.35);
+}
+
+.vecna-sender-name { font-weight: 700; color: #f6eef3; }

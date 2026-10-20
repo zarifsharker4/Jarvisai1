@@ -1,19 +1,34 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
-    <radialGradient id="core" cx="50%" cy="42%" r="60%">
-      <stop offset="0%" stop-color="#ff3b5c"/>
-      <stop offset="55%" stop-color="#c81d4a"/>
-      <stop offset="100%" stop-color="#5a0018"/>
-    </radialGradient>
     <radialGradient id="halo" cx="50%" cy="50%" r="50%">
-      <stop offset="60%" stop-color="#1b0308" stop-opacity="0"/>
-      <stop offset="100%" stop-color="#1b0308" stop-opacity="0.9"/>
+      <stop offset="40%" stop-color="#ff1e3c" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#7a0016" stop-opacity="0"/>
     </radialGradient>
+    <radialGradient id="core" cx="50%" cy="42%" r="62%">
+      <stop offset="0%" stop-color="#ff6a7f"/>
+      <stop offset="38%" stop-color="#ff1e3c"/>
+      <stop offset="72%" stop-color="#9c0424"/>
+      <stop offset="100%" stop-color="#37000e"/>
+    </radialGradient>
+    <linearGradient id="blade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ff8d7a" stop-opacity="0.95"/>
+      <stop offset="60%" stop-color="#c2103a" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#4a0012" stop-opacity="0.2"/>
+    </linearGradient>
   </defs>
-  <rect width="64" height="64" fill="#050204"/>
-  <circle cx="32" cy="32" r="26" fill="url(#halo)"/>
-  <circle cx="32" cy="30" r="18" fill="url(#core)"/>
-  <path d="M32 10 a22 22 0 0 1 22 22 v6 a14 14 0 0 0 -14 -14 z" fill="#ff7a4d" opacity="0.85"/>
-  <path d="M32 52 a22 22 0 0 0 22 -22 v-6 a14 14 0 0 1 -14 14 z" fill="#3a0010" opacity="0.9"/>
-  <circle cx="32" cy="30" r="7" fill="#fff2f0"/>
+  <rect width="64" height="64" fill="#050308"/>
+  <circle cx="32" cy="32" r="31" fill="url(#halo)"/>
+  <g fill="url(#blade)">
+    <path d="M32 1.5 L35.6 12.4 L32 16 L28.4 12.4 Z"/>
+    <path d="M32 1.5 L35.6 12.4 L32 16 L28.4 12.4 Z" transform="rotate(45 32 32)"/>
+    <path d="M32 1.5 L35.6 12.4 L32 16 L28.4 12.4 Z" transform="rotate(90 32 32)"/>
+    <path d="M32 1.5 L35.6 12.4 L32 16 L28.4 12.4 Z" transform="rotate(135 32 32)"/>
+    <path d="M32 1.5 L35.6 12.4 L32 16 L28.4 12.4 Z" transform="rotate(180 32 32)"/>
+    <path d="M32 1.5 L35.6 12.4 L32 16 L28.4 12.4 Z" transform="rotate(225 32 32)"/>
+    <path d="M32 1.5 L35.6 12.4 L32 16 L28.4 12.4 Z" transform="rotate(270 32 32)"/>
+    <path d="M32 1.5 L35.6 12.4 L32 16 L28.4 12.4 Z" transform="rotate(315 32 32)"/>
+  </g>
+  <circle cx="32" cy="31" r="17.5" fill="url(#core)"/>
+  <ellipse cx="32" cy="31" rx="4" ry="9.5" fill="#fff1f2"/>
+  <ellipse cx="32" cy="31" rx="1.5" ry="7.5" fill="#140005"/>
 </svg>

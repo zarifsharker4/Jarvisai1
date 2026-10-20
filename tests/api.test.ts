@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../server/app';
-import { freebuffAuth, isLoopbackOrigin } from '../server/authz';
+import { resolveRequestUser } from '../server/authz';
 import type { AppDeps } from '../server/deps';
 import type { Env, RequestUser } from '../server/types';
 import { createLiteD1 } from './d1lite';
@@ -20,16 +20,27 @@ function makeApp(user: RequestUser | null): Fixture {
     DB: db,
     APP_ORIGIN: ORIGIN,
     APP_SECRET: 'test-secret',
-    FREEBUFF_CLIENT_ID: 'client-test',
-    FREEBUFF_ISSUER: 'https://freebuff.com/oidc',
+    APP_ENV: 'test',
   };
   const deps: AppDeps = { resolveUser: async () => user };
   return { app: createApp(deps), env, user: user!, deps };
 }
 
+/** App wired to the real cookie resolver, for the end-to-end auth flow. */
+function makeRealApp() {
+  const db = createLiteD1();
+  const env: Env = {
+    DB: db,
+    APP_ORIGIN: ORIGIN,
+    APP_SECRET: 'test-secret',
+    APP_ENV: 'test',
+  };
+  return { app: createApp({ resolveUser: resolveRequestUser }), env, db };
+}
+
 const primary: RequestUser = {
-  sub: 'freebuff-user-1',
-  provider: 'freebuff',
+  sub: 'email:first@example.com',
+  provider: 'email',
   email: 'first@example.com',
   name: 'First User',
 };
@@ -40,7 +51,6 @@ function json(path: string, body: unknown, method: 'POST' | 'PATCH' | 'PUT' | 'D
     headers: {
       'Content-Type': 'application/json',
       Origin: origin,
-      ...(method === 'POST' || method === 'PATCH' || method === 'PUT' ? {} : {}),
     },
     body: JSON.stringify(body),
   } satisfies RequestInit;
@@ -71,10 +81,15 @@ describe('public routes', () => {
     const boot = await app.request('/api/bootstrap', {}, env);
     expect(boot.status).toBe(200);
     const body = (await boot.json()) as {
+      auth: { otpDigits: number; pinDigits: number; senderName: string };
       providers: Array<{ id: string }>;
       agents: Array<{ id: string }>;
       themes: Array<{ id: string }>;
     };
+    expect(body.auth.otpDigits).toBe(6);
+    expect(body.auth.pinDigits).toBe(4);
+    expect(body.auth.senderName).toBe('Vecna from Mind Flayer');
+
     const ids = body.providers.map((p) => p.id);
     for (const required of [
       'google-ai-studio',
@@ -130,10 +145,21 @@ describe('public routes', () => {
     const res = await app.request('/api/pin/set', json('/api/pin/set', { pin: '1234' }, 'POST', 'https://evil.example'), env);
     expect(res.status).toBe(403);
   });
+
+  it('has no Google OAuth entry points left', async () => {
+    const { app, env } = makeApp(null);
+    for (const path of ['/auth/google/start', '/auth/google/callback', '/api/auth/google/signout']) {
+      const res = await app.request(path, {}, env);
+      expect(res.status, path).toBe(404);
+      expect(res.headers.get('location')).toBeNull();
+    }
+    const save = await app.request('/api/settings/google', json('/api/settings/google', { clientId: 'x' }), env);
+    expect(save.status).toBe(404);
+  });
 });
 
 describe('account provisioning', () => {
-  it('creates a user with a unique tag and a Mind Flayer-branded welcome email', async () => {
+  it('creates a user with a unique tag and a Vecna-branded welcome email', async () => {
     const { app, env } = makeApp(primary);
 
     const me1 = await app.request('/api/me', {}, env);
@@ -149,16 +175,18 @@ describe('account provisioning', () => {
     expect(body2.user.tag).toBe(body.user.tag); // tag is stable
 
     const outbox = await app.request('/api/outbox', {}, env);
-    const { emails } = (await outbox.json()) as { emails: Array<{ from_email: string; subject: string; html: string }> };
+    const { emails } = (await outbox.json()) as {
+      emails: Array<{ from_email: string; subject: string; html: string }>;
+    };
     expect(emails.length).toBe(1);
-    expect(emails[0].from_email).toBe('Mind Flayer <mind@mindflayer.ai>');
+    expect(emails[0].from_email).toBe('Vecna from Mind Flayer <vecna@mindflayer.ai>');
     expect(emails[0].subject).toContain(body.user.tag);
-    expect(emails[0].html).toContain('Mind Flayer');
+    expect(emails[0].html).toContain('/brand/vecna-avatar.png');
   });
 
   it('keeps two accounts fully separate', async () => {
     const one = makeApp(primary);
-    const two = makeApp({ sub: 'freebuff-user-2', provider: 'freebuff', email: 'second@example.com' });
+    const two = makeApp({ sub: 'email:second@example.com', provider: 'email', email: 'second@example.com' });
 
     const create = await one.app.request('/api/chats', json('/api/chats', { title: 'mine' }), one.env);
     expect(create.status).toBe(201);
@@ -174,15 +202,217 @@ describe('account provisioning', () => {
 
   it('updates theme with a same-origin PATCH', async () => {
     const { app, env } = makeApp(primary);
-    const res = await app.request('/api/me', json('/api/me', { theme: 'mind-flayer-void' }, 'PATCH'), env);
+    const res = await app.request('/api/me', json('/api/me', { theme: 'vecna-curse' }, 'PATCH'), env);
     expect(res.status).toBe(200);
     const me = (await (await app.request('/api/me', {}, env)).json()) as { user: { theme: string } };
-    expect(me.user.theme).toBe('mind-flayer-void');
+    expect(me.user.theme).toBe('vecna-curse');
+  });
+});
+
+describe('email + password auth with a 6-digit code', () => {
+  it('signs up, mails a Vecna code, verifies it and opens a session', async () => {
+    const { app, env } = makeRealApp();
+
+    const signup = await app.request(
+      '/api/auth/signup',
+      json('/api/auth/signup', { email: 'Sarah@Example.com', password: 'vecna-is-here' }),
+      env,
+    );
+    expect(signup.status).toBe(200);
+    const body = (await signup.json()) as { email: string; devCode: string; delivery: string };
+    expect(body.email).toBe('sarah@example.com');
+    expect(body.devCode).toMatch(/^\d{6}$/);
+    // no provider key in tests, so the message is rendered into the outbox
+    expect(body.delivery).toBe('outbox');
+
+    const mail = await env.DB!.prepare('SELECT * FROM outbox ORDER BY created_at DESC LIMIT 1').first<{
+      to_email: string;
+      from_email: string;
+      subject: string;
+      html: string;
+      body_text: string;
+    }>();
+    expect(mail?.to_email).toBe('sarah@example.com');
+    expect(mail?.from_email).toBe('Vecna from Mind Flayer <vecna@mindflayer.ai>');
+    expect(mail?.subject).toContain(body.devCode);
+    expect(mail?.html).toContain('Vecna from Mind Flayer');
+    expect(mail?.html).toContain('/brand/vecna-avatar.png');
+    // human tone, not a system notice
+    expect(mail?.body_text).toMatch(/Hey, it's Vecna/);
+    expect(mail?.body_text).toMatch(/ignore it/i);
+    expect(mail?.body_text).not.toMatch(/do not reply|no-reply|automated message/i);
+    // the old Google account surface is gone
+    expect(`${mail?.html}${mail?.body_text}`).not.toMatch(/google/i);
+
+    const wrong = body.devCode === '000000' ? '111111' : '000000';
+    const bad = await app.request(
+      '/api/auth/verify',
+      json('/api/auth/verify', { email: body.email, code: wrong, purpose: 'signup' }),
+      env,
+    );
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).reason).toBe('bad_code');
+
+    const verify = await app.request(
+      '/api/auth/verify',
+      json('/api/auth/verify', { email: body.email, code: body.devCode, purpose: 'signup' }),
+      env,
+    );
+    expect(verify.status).toBe(200);
+    const cookie = verify.headers.get('set-cookie');
+    expect(cookie).toContain('mindflayer_session=');
+
+    const me = await app.request('/api/me', { headers: { cookie: cookie!.split(';')[0] } }, env);
+    expect(me.status).toBe(200);
+    const account = (await me.json()) as { user: { provider: string; email: string; tag: string; pinEnabled: boolean } };
+    expect(account.user.provider).toBe('email');
+    expect(account.user.email).toBe('sarah@example.com');
+    expect(account.user.tag).toMatch(/^@mindflayer-[a-z2-9]{6}$/);
+    expect(account.user.pinEnabled).toBe(false);
+
+    // a consumed code cannot be replayed
+    const replay = await app.request(
+      '/api/auth/verify',
+      json('/api/auth/verify', { email: body.email, code: body.devCode, purpose: 'signup' }),
+      env,
+    );
+    expect(replay.status).toBe(400);
+  });
+
+  it('requires the password before issuing a login code, and keeps the same account', async () => {
+    const { app, env } = makeRealApp();
+    const base = { email: 'kate@example.com', password: 'a-good-password' };
+
+    const signup = await app.request('/api/auth/signup', json('/api/auth/signup', base), env);
+    const first = (await signup.json()) as { devCode: string };
+    const verified = await app.request(
+      '/api/auth/verify',
+      json('/api/auth/verify', { email: base.email, code: first.devCode, purpose: 'signup' }),
+      env,
+    );
+    expect(verified.status).toBe(200);
+    const cookie = verified.headers.get('set-cookie')!.split(';')[0];
+    const before = (await (await app.request('/api/me', { headers: { cookie } }, env)).json()) as {
+      user: { tag: string };
+    };
+
+    const wrongPassword = await app.request(
+      '/api/auth/login',
+      json('/api/auth/login', { email: base.email, password: 'not-the-password' }),
+      env,
+    );
+    expect(wrongPassword.status).toBe(401);
+    expect((await wrongPassword.json()).reason).toBe('bad_credentials');
+
+    const login = await app.request('/api/auth/login', json('/api/auth/login', base), env);
+    expect(login.status).toBe(200);
+    const challenge = (await login.json()) as { devCode: string; purpose: string };
+    expect(challenge.purpose).toBe('login');
+    expect(challenge.devCode).toMatch(/^\d{6}$/);
+
+    const verify = await app.request(
+      '/api/auth/verify',
+      json('/api/auth/verify', { email: base.email, code: challenge.devCode, purpose: 'login' }),
+      env,
+    );
+    expect(verify.status).toBe(200);
+    const afterCookie = verify.headers.get('set-cookie')!.split(';')[0];
+    const after = (await (await app.request('/api/me', { headers: { cookie: afterCookie } }, env)).json()) as {
+      user: { tag: string; provider: string };
+    };
+    expect(after.user.tag).toBe(before.user.tag);
+
+    // signing out revokes the server-side session, so the old cookie is dead
+    const signoutInit = json('/api/auth/signout', {});
+    const out = await app.request(
+      '/api/auth/signout',
+      { ...signoutInit, headers: { ...signoutInit.headers, cookie: afterCookie } },
+      env,
+    );
+    expect(out.status).toBe(200);
+    expect(out.headers.get('set-cookie')).toContain('Max-Age=0');
+    const me = await app.request('/api/me', { headers: { cookie: afterCookie } }, env);
+    expect(me.status).toBe(401);
+  });
+
+  it('validates input and refuses duplicate or weak signups', async () => {
+    const { app, env } = makeRealApp();
+
+    const weak = await app.request(
+      '/api/auth/signup',
+      json('/api/auth/signup', { email: 'weak@example.com', password: 'short' }),
+      env,
+    );
+    expect(weak.status).toBe(400);
+    expect((await weak.json()).field).toBe('password');
+
+    const badEmail = await app.request(
+      '/api/auth/signup',
+      json('/api/auth/signup', { email: 'not-an-email', password: 'a-good-password' }),
+      env,
+    );
+    expect(badEmail.status).toBe(400);
+
+    const ok = await app.request(
+      '/api/auth/signup',
+      json('/api/auth/signup', { email: 'dup@example.com', password: 'a-good-password' }),
+      env,
+    );
+    expect(ok.status).toBe(200);
+    const { devCode } = (await ok.json()) as { devCode: string };
+    await app.request(
+      '/api/auth/verify',
+      json('/api/auth/verify', { email: 'dup@example.com', code: devCode, purpose: 'signup' }),
+      env,
+    );
+
+    const duplicate = await app.request(
+      '/api/auth/signup',
+      json('/api/auth/signup', { email: 'dup@example.com', password: 'another-password' }),
+      env,
+    );
+    expect(duplicate.status).toBe(409);
+    expect((await duplicate.json()).reason).toBe('exists');
+
+    const foreign = await app.request(
+      '/api/auth/signup',
+      json('/api/auth/signup', { email: 'csrf@example.com', password: 'a-good-password' }, 'POST', 'https://evil.example'),
+      env,
+    );
+    expect(foreign.status).toBe(403);
+  });
+
+  it('burns the code after five wrong guesses', async () => {
+    const { app, env } = makeRealApp();
+    const res = await app.request(
+      '/api/auth/signup',
+      json('/api/auth/signup', { email: 'lock@example.com', password: 'a-good-password' }),
+      env,
+    );
+    const { devCode } = (await res.json()) as { devCode: string };
+    const wrong = devCode === '000000' ? '111111' : '000000';
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const bad = await app.request(
+        '/api/auth/verify',
+        json('/api/auth/verify', { email: 'lock@example.com', code: wrong, purpose: 'signup' }),
+        env,
+      );
+      expect(bad.status).toBe(400);
+    }
+
+    const blocked = await app.request(
+      '/api/auth/verify',
+      json('/api/auth/verify', { email: 'lock@example.com', code: devCode, purpose: 'signup' }),
+      env,
+    );
+    expect(blocked.status).toBe(429);
+    expect((await blocked.json()).reason).toBe('too_many_attempts');
   });
 });
 
 describe('PIN lock', () => {
-  it('locks chat history behind a PIN and unlocks with a token', async () => {
+  it('locks chat history behind a 4-digit PIN and unlocks with a token', async () => {
     const { app, env } = makeApp(primary);
 
     // create a chat first (history unlocked)
@@ -242,6 +472,29 @@ describe('PIN lock', () => {
     expect(disableOk.status).toBe(200);
     const open = await app.request('/api/chats', {}, env);
     expect(open.status).toBe(200);
+  });
+
+  it('only accepts exactly four digits', async () => {
+    const { app, env } = makeApp(primary);
+    for (const pin of ['123', '12345', 'abcd', '', '12 34']) {
+      const res = await app.request('/api/pin/set', json('/api/pin/set', { pin }), env);
+      expect(res.status, pin).toBe(400);
+    }
+    const ok = await app.request('/api/pin/set', json('/api/pin/set', { pin: '0420' }), env);
+    expect(ok.status).toBe(200);
+  });
+
+  it('throttles brute force after five wrong PINs', async () => {
+    const { app, env } = makeApp(primary);
+    await app.request('/api/pin/set', json('/api/pin/set', { pin: '7788' }), env);
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const bad = await app.request('/api/pin/verify', json('/api/pin/verify', { pin: '0000' }), env);
+      expect([403, 429]).toContain(bad.status);
+    }
+    const blocked = await app.request('/api/pin/verify', json('/api/pin/verify', { pin: '7788' }), env);
+    expect(blocked.status).toBe(429);
+    expect((await blocked.json()).reason).toBe('pin_locked');
   });
 });
 
@@ -411,48 +664,6 @@ describe('AI surfaces (offline demo engine)', () => {
   });
 });
 
-describe('Google OAuth scaffolding', () => {
-  it('reports unconfigured Google and refuses to start the flow', async () => {
-    const { app, env } = makeApp(primary);
-    const settings = await app.request('/api/settings/auth', {}, env);
-    const body = (await settings.json()) as { google: { configured: boolean }; freebuff: { enabled: boolean } };
-    expect(body.google.configured).toBe(false);
-    expect(body.freebuff.enabled).toBe(true);
-
-    const start = await app.request('/auth/google/start', {}, env);
-    expect(start.status).toBe(302);
-    expect(start.headers.get('location')).toContain('/?auth_error=not_configured');
-  });
-
-  it('saves Google credentials and starts a real Google redirect', async () => {
-    const { app, env } = makeApp(primary);
-    const save = await app.request(
-      '/api/settings/google',
-      json('/api/settings/google', { clientId: 'abc.apps.googleusercontent.com', clientSecret: 'GOCSPX-secret' }),
-      env,
-    );
-    expect(save.status).toBe(200);
-
-    const start = await app.request('/auth/google/start', {}, env);
-    expect(start.status).toBe(302);
-    const location = start.headers.get('location')!;
-    expect(location).toContain('accounts.google.com/o/oauth2/v2/auth');
-    expect(location).toContain('client_id=abc.apps.googleusercontent.com');
-    expect(location).toContain(encodeURIComponent(`${ORIGIN}/auth/google/callback`));
-    expect(location).toContain('state=');
-
-    // secret is encrypted at rest
-    const row = await env.DB!.prepare("SELECT value FROM kv WHERE key = 'google_client_secret'").first<{ value: string }>();
-    expect(row?.value.startsWith('v1.')).toBe(true);
-    expect(row?.value).not.toContain('GOCSPX-secret');
-
-    // callback with a bogus state bounces back with an error
-    const callback = await app.request('/auth/google/callback?code=x&state=bogus', {}, env);
-    expect(callback.status).toBe(302);
-    expect(callback.headers.get('location')).toContain('auth_error=state');
-  });
-});
-
 describe('static fallback', () => {
   it('falls back to assets when bound, JSON 404 otherwise', async () => {
     const { app, env } = makeApp(null);
@@ -466,30 +677,6 @@ describe('static fallback', () => {
     const spa = await app.request('/chat/deep/link', {}, withAssets);
     expect(spa.status).toBe(200);
     expect(await spa.text()).toContain('SPA');
-  });
-});
-
-describe('auth instance creation', () => {
-  it('accepts loopback http origins only for dev and https for production', () => {
-    expect(isLoopbackOrigin('http://localhost:3002')).toBe(true);
-    expect(isLoopbackOrigin('http://127.0.0.1:8787')).toBe(true);
-    expect(isLoopbackOrigin('https://site.example')).toBe(false);
-    expect(isLoopbackOrigin('http://evil.example')).toBe(false);
-
-    const local = freebuffAuth({
-      APP_ORIGIN: 'http://localhost:3002',
-      FREEBUFF_CLIENT_ID: 'client-test',
-      FREEBUFF_ISSUER: 'https://freebuff.com/oidc',
-    });
-    expect(local.clientId).toBe('client-test');
-    expect(local.issuer).toBe('https://freebuff.com/oidc');
-
-    const prod = freebuffAuth({
-      APP_ORIGIN: 'https://site.example',
-      FREEBUFF_CLIENT_ID: 'client-prod',
-      FREEBUFF_ISSUER: 'https://freebuff.com/oidc',
-    });
-    expect(prod.clientId).toBe('client-prod');
   });
 });
 

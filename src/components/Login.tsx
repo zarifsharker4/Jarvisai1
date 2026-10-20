@@ -1,14 +1,120 @@
+import { useEffect, useState, type FormEvent } from 'react';
+import { ApiError, api } from '../api';
 import { useApp } from '../state';
+import { VecnaLogo } from './VecnaLogo';
 
-/** Mind Flayer archive-style landing + auth slide.
- *
- * Full-screen animated arc-reactor / HUD background. Google is the only
- * sign-in surface shown on the primary view. Freebuff sign-in references are
- * intentionally excluded from this screen.
- */
+type Mode = 'login' | 'signup';
+
+type CodeChallenge = {
+  email: string;
+  purpose: Mode;
+  delivery: string;
+  canDeliver: boolean;
+  devCode?: string;
+};
+
+/** Mind Flayer archive-style landing + auth slide. */
 export function Login() {
-  const { bootstrap } = useApp();
-  const configured = bootstrap?.google?.configured ?? false;
+  const { bootstrap, refreshSession } = useApp();
+  const sender = bootstrap?.auth?.senderName ?? 'Vecna from Mind Flayer';
+
+  const [mode, setMode] = useState<Mode>('login');
+  const [challenge, setChallenge] = useState<CodeChallenge | null>(null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [code, setCode] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const timer = window.setInterval(() => setCooldown((n) => (n <= 1 ? 0 : n - 1)), 1000);
+    return () => window.clearInterval(timer);
+  }, [cooldown]);
+
+  const switchMode = (next: Mode) => {
+    setMode(next);
+    setChallenge(null);
+    setCode('');
+    setError(null);
+    setNotice(null);
+  };
+
+  const startChallenge = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await api<CodeChallenge>(`/api/auth/${mode}`, {
+        method: 'POST',
+        body: { email: email.trim(), password },
+      });
+      setChallenge(res);
+      setCode('');
+      setCooldown(60);
+      setNotice(
+        res.delivery === 'sent'
+          ? `${sender} just sent your 6-digit code. It dies in 10 minutes.`
+          : null,
+      );
+    } catch (err) {
+      if (err instanceof ApiError && err.reason === 'exists') {
+        setMode('login');
+        setError('That email already has an account — enter your password to sign in.');
+      } else if (err instanceof ApiError && err.status === 429) {
+        setError(err.message);
+        setCooldown(60);
+      } else {
+        setError(err instanceof ApiError ? err.message : 'Something went wrong');
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const verify = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!challenge) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api('/api/auth/verify', {
+        method: 'POST',
+        body: { email: challenge.email, code, purpose: challenge.purpose },
+      });
+      await refreshSession();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not verify that code');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resend = async () => {
+    if (!challenge) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api<CodeChallenge>('/api/auth/resend', {
+        method: 'POST',
+        body: { email: challenge.email, purpose: challenge.purpose },
+      });
+      setChallenge(res);
+      setCooldown(60);
+      setNotice(
+        res.delivery === 'sent'
+          ? 'New code sent. The old one is already dead.'
+          : 'New code ready below — mail delivery is not configured yet.',
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not resend the code');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="landing">
@@ -18,12 +124,8 @@ export function Login() {
         <div className="hud-ring hud-ring-1" />
         <div className="hud-ring hud-ring-2" />
         <div className="hud-ring hud-ring-3" />
-        <div className="arc-reactor">
-          <div className="core-pulse" />
-          <div className="core" />
-          <div className="core-ring" />
-          <div className="core-ring-2" />
-          <div className="core-glow" />
+        <div className="vecna-hero">
+          <VecnaLogo size={240} className="vecna-hero-sigil" />
         </div>
         <div className="hud-scan" />
         <div className="hud-corner top-left" aria-hidden />
@@ -36,20 +138,8 @@ export function Login() {
       {/* Foreground card */}
       <div className="landing-card">
         <div className="brand-block">
-          <div className="brand-mark" aria-hidden>
-            <svg viewBox="0 0 48 48" className="brand-icon" aria-hidden="true">
-              <defs>
-                <radialGradient id="mfCoreSmall" cx="50%" cy="44%" r="60%">
-                  <stop offset="0%" stopColor="#ff5c72" />
-                  <stop offset="55%" stopColor="#c81d4a" />
-                  <stop offset="100%" stopColor="#5a0018" />
-                </radialGradient>
-              </defs>
-              <circle cx="24" cy="22" r="12" fill="url(#mfCoreSmall)" />
-              <path d="M24 8 a16 16 0 0 1 16 16 v4 a10 10 0 0 0 -10 -10 z" fill="#ff9460" opacity="0.9" />
-              <circle cx="24" cy="22" r="5" fill="#fff2f0" />
-              <circle cx="24" cy="22" r="2.6" fill="#1b0308" />
-            </svg>
+          <div className="brand-mark vecna-mark" aria-hidden>
+            <VecnaLogo size={44} className="brand-icon" />
           </div>
           <div>
             <h1 className="brand-name">Mind Flayer</h1>
@@ -57,89 +147,168 @@ export function Login() {
           </div>
         </div>
 
-        <p className="landing-copy">
-          Orchestrator plans, Coder builds, Reviewer audits — together in chat, in the live
-          AI-to-AI discussion space, and on a group voice call. Your history is protected by a
-          PIN and your API keys stay encrypted on your own account.
-        </p>
+        {challenge ? (
+          <>
+            <button className="auth-back" type="button" onClick={() => setChallenge(null)}>
+              ← Use a different email
+            </button>
 
-        <div className="landing-actions">
-          <a className="btn btn-google btn-lg" href="/auth/google/start">
-            <GoogleGlyph />
-            <span>Sign in with Google</span>
-          </a>
-          <a className="btn btn-google-outline btn-lg" href="/auth/google/start">
-            <GoogleGlyph />
-            <span>Create Account with Google</span>
-          </a>
-        </div>
+            <div className="auth-step">
+              <div className="auth-step-head">
+                <span className="auth-avatar" aria-hidden>
+                  <VecnaLogo size={40} />
+                </span>
+                <div>
+                  <div className="auth-sender">{sender}</div>
+                  <div className="auth-sender-mail">vecna@mindflayer.ai</div>
+                </div>
+              </div>
+              <h2 className="auth-title">Check your inbox</h2>
+              <p className="auth-copy">
+                I sent a 6-digit code to <strong>{challenge.email}</strong>. Type it below —
+                it dies in 10 minutes, and the old one stops working the moment a new one is
+                issued.
+              </p>
 
-        <ul className="landing-points">
-          <li className="point">
-            <span className="point-icon" aria-hidden>
-              <svg viewBox="0 0 24 24" fill="currentColor">
-                <path d="M4 7a4 4 0 1 1 8 0 4 4 0 0 1-8 0zm14 0a4 4 0 1 0 8 0 4 4 0 0 0-8 0zm-1 9a4 4 0 1 0 8 0v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a4 4 0 0 0-8 0v2a6 6 0 0 0 12 0v-2h2a2 2 0 0 0 2-2V16z" />
-              </svg>
-            </span>
-            <span className="point-text">
-              Unique <strong>@mindflayer-…</strong> tag for every account
-            </span>
-          </li>
-          <li className="point">
-            <span className="point-icon" aria-hidden>
-              <svg viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 2a7 7 0 0 0-7 7c0 2.1.9 4.1 2.5 5.5L7 22h10l-2.5-7.5A7 7 0 0 0 12 9a7 7 0 0 0 7-7zM9.5 14a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm4 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm.5 4a1 1 0 1 1 0-2 1 1 0 0 1 0 2z" />
-              </svg>
-            </span>
-            <span className="point-text">PIN-locked chat history</span>
-          </li>
-          <li className="point">
-            <span className="point-icon" aria-hidden>
-              <svg viewBox="0 0 24 24" fill="currentColor">
-                <path d="M3 3h9l4 4v14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm10 2a2 2 0 1 1 4 0 2 2 0 0 1-4 0zm-2 7a2 2 0 1 1 4 0v3a6 6 0 0 1-12 0V12zm0 4a2 2 0 1 0 4 0 2 2 0 0 0-4 0z" />
-              </svg>
-            </span>
-            <span className="point-text">Encrypted connectors — bring your own API keys</span>
-          </li>
-          <li className="point">
-            <span className="point-icon" aria-hidden>
-              <svg viewBox="0 0 24 24" fill="currentColor">
-                <path d="M20 6h-4V4a2 2 0 0 0-4 0v2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2zm-6 3a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM4 8h8v9H4V8zm2 0v9h4V8H6zm8-3a2 2 0 1 0 0-4 2 2 0 0 0 0 4z" />
-              </svg>
-            </span>
-            <span className="point-text">Branded mail record for your account</span>
-          </li>
-        </ul>
+              <form className="auth-form" onSubmit={verify}>
+                <label className="field">
+                  <span>6-digit code</span>
+                  <input
+                    className="input otp-input"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    pattern="\d{6}"
+                    maxLength={6}
+                    autoFocus
+                    placeholder="000000"
+                    value={code}
+                    onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  />
+                </label>
+                {error ? <div className="form-error">{error}</div> : null}
+                {notice ? <div className="auth-notice">{notice}</div> : null}
+                {challenge.devCode ? (
+                  <div className="auth-devcode">
+                    <strong>Mail delivery is not configured.</strong> Set{' '}
+                    <code className="inline-code">KNOCK_API_KEY</code> to have Vecna actually send
+                    this. Until then the code is{' '}
+                    <span className="dev-code">{challenge.devCode}</span>
+                  </div>
+                ) : challenge.delivery !== 'sent' ? (
+                  <div className="auth-devcode">
+                    <strong>Vecna could not send the mail.</strong> Ask whoever runs this deployment
+                    to set <code className="inline-code">KNOCK_API_KEY</code>; the message is waiting in
+                    the server outbox.
+                  </div>
+                ) : null}
+                <button
+                  className="btn btn-primary btn-lg auth-submit"
+                  type="submit"
+                  disabled={busy || code.length !== 6}
+                >
+                  {busy ? 'Verifying…' : 'Verify & enter'}
+                </button>
+              </form>
 
-        {configured ? null : (
-          <div className="landing-note">
-            <strong>Configure Google OAuth</strong>
-            <p className="muted">
-              Add your Google OAuth client ID and secret in Settings → Authentication to enable the
-              Google sign-in flow.
+              <div className="auth-links">
+                <button
+                  className="link-btn"
+                  type="button"
+                  onClick={() => void resend()}
+                  disabled={busy || cooldown > 0}
+                >
+                  {cooldown > 0 ? `Resend in ${cooldown}s` : 'Resend the code'}
+                </button>
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="auth-switch" role="tablist" aria-label="Authentication">
+              <button
+                role="tab"
+                aria-selected={mode === 'login'}
+                className={`auth-tab ${mode === 'login' ? 'active' : ''}`}
+                onClick={() => switchMode('login')}
+                type="button"
+              >
+                Sign in
+              </button>
+              <button
+                role="tab"
+                aria-selected={mode === 'signup'}
+                className={`auth-tab ${mode === 'signup' ? 'active' : ''}`}
+                onClick={() => switchMode('signup')}
+                type="button"
+              >
+                Create account
+              </button>
+            </div>
+
+            <p className="landing-copy">
+              {mode === 'login'
+                ? 'Email and password, then a 6-digit code from Vecna. No Google, no popups, no config screens.'
+                : 'Pick an email and a password. Vecna mails you a 6-digit code to prove the address is yours.'}
             </p>
-          </div>
-        )}
 
-        <p className="landing-foot">
-          New here? Signing in creates your account automatically and mails you your tag.
-        </p>
+            <form className="auth-form" onSubmit={startChallenge}>
+              <label className="field">
+                <span>Email</span>
+                <input
+                  className="input"
+                  type="email"
+                  name="email"
+                  autoComplete="email"
+                  required
+                  placeholder="you@example.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>Password</span>
+                <input
+                  className="input"
+                  type="password"
+                  name="password"
+                  autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+                  required
+                  minLength={mode === 'signup' ? 8 : undefined}
+                  placeholder={mode === 'signup' ? 'at least 8 characters' : 'your password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+              </label>
+              {error ? <div className="form-error">{error}</div> : null}
+              <button className="btn btn-primary btn-lg auth-submit" type="submit" disabled={busy}>
+                {busy ? 'One moment…' : mode === 'login' ? 'Send my code' : 'Create account & send code'}
+              </button>
+            </form>
+
+            <ul className="landing-points">
+              <li className="point">
+                <span className="point-icon" aria-hidden>★</span>
+                <span className="point-text">
+                  Unique <strong>@mindflayer-…</strong> tag for every account
+                </span>
+              </li>
+              <li className="point">
+                <span className="point-icon" aria-hidden>◉</span>
+                <span className="point-text">4-digit PIN lock on your chat history</span>
+              </li>
+              <li className="point">
+                <span className="point-icon" aria-hidden>⌘</span>
+                <span className="point-text">Encrypted connectors — bring your own API keys</span>
+              </li>
+            </ul>
+
+            <p className="landing-foot">
+              Codes come from <strong>{sender}</strong>
+              {bootstrap?.auth?.mailConfigured ? '' : ' · mail delivery needs a provider key'}.
+            </p>
+          </>
+        )}
       </div>
     </div>
-  );
-}
-
-/** Official Google "Sign in with Google" glyph: standard color G on white. */
-function GoogleGlyph() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
-      <path
-        fill="#FFC107"
-        d="M43.6 20.1H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l5.7-5.7C34.2 6.1 29.3 4 24 4 13 4 4 13 4 24s9 20 20 20 20-9 20-20c0-1.3-.1-2.6-.4-3.9z"
-      />
-      <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.1 8 3l5.7-5.7C34.2 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" />
-      <path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.2 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z" />
-      <path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.3-2.3 4.3-4.1 5.6l6.2 5.2C36.9 40.2 44 35 44 24c0-1.3-.1-2.6-.4-3.9z" />
-    </svg>
   );
 }
