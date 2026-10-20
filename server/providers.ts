@@ -6,10 +6,12 @@ import type { ConnectorRow, Env } from './types';
  * /chat/completions contract, so a connector is just base URL + key + model.
  * Users can add an unlimited number of connectors, including custom ones.
  */
+export type ProviderKind = 'llm' | 'tts' | 'github';
+
 export type ProviderPreset = {
   id: string;
   label: string;
-  kind: 'llm' | 'tts';
+  kind: ProviderKind;
   baseUrl: string;
   defaultModel?: string;
   docs: string;
@@ -65,6 +67,34 @@ export const PROVIDERS: ProviderPreset[] = [
     keyHint: '...',
   },
   {
+    id: 'anthropic',
+    label: 'Anthropic (Claude)',
+    kind: 'llm',
+    baseUrl: 'https://api.anthropic.com/v1',
+    defaultModel: 'claude-sonnet-4-5',
+    docs: 'https://console.anthropic.com/settings/keys',
+    keyHint: 'sk-ant-...',
+    note: 'Uses Anthropic\'s OpenAI-compatible endpoint.',
+  },
+  {
+    id: 'xai',
+    label: 'xAI (Grok)',
+    kind: 'llm',
+    baseUrl: 'https://api.x.ai/v1',
+    defaultModel: 'grok-4',
+    docs: 'https://console.x.ai',
+    keyHint: 'xai-...',
+  },
+  {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    kind: 'llm',
+    baseUrl: 'https://api.deepseek.com/v1',
+    defaultModel: 'deepseek-chat',
+    docs: 'https://platform.deepseek.com/api_keys',
+    keyHint: 'sk-...',
+  },
+  {
     id: 'openllm',
     label: 'OpenLLM',
     kind: 'llm',
@@ -95,6 +125,15 @@ export const PROVIDERS: ProviderPreset[] = [
     note: 'Any endpoint that exposes POST /chat/completions.',
   },
   {
+    id: 'github',
+    label: 'GitHub',
+    kind: 'github',
+    baseUrl: 'https://api.github.com',
+    docs: 'https://github.com/settings/tokens',
+    keyHint: 'ghp_... / github_pat_...',
+    note: 'Personal access token powering the Hellfire file IDE: pull, browse and push to any repo you can access.',
+  },
+  {
     id: 'elevenlabs',
     label: 'ElevenLabs (voice)',
     kind: 'tts',
@@ -116,7 +155,54 @@ export type LLMClient = {
   label: string;
 };
 
-export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
+/**
+ * Multimodal content: a plain string, or OpenAI-style parts so Vecna chat can
+ * carry image + file attachments to providers that support them (Gemini,
+ * Claude, GPT-4o via their OpenAI-compatible endpoints).
+ */
+export type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] };
+
+export type Attachment = {
+  kind: 'image' | 'text';
+  name: string;
+  mime?: string;
+  /** data: URL for images, raw text for text attachments. */
+  data: string;
+};
+
+/**
+ * Compose a user message that carries attachments: text files are inlined as
+ * fenced blocks, images become image_url parts so multimodal models see them.
+ */
+export function composeUserContent(text: string, attachments: Attachment[] = []): string | ContentPart[] {
+  const images = attachments.filter((a) => a.kind === 'image');
+  const texts = attachments.filter((a) => a.kind === 'text');
+  const inlined = texts.length
+    ? `${text}\n\n${texts
+        .map((a) => `Attached file — ${a.name}:\n\`\`\`${guessLang(a.name)}\n${a.data.slice(0, 40_000)}\n\`\`\``)
+        .join('\n\n')}`
+    : text;
+  if (!images.length) return inlined;
+  const parts: ContentPart[] = [{ type: 'text', text: inlined }];
+  for (const image of images.slice(0, 4)) {
+    const url = image.data.startsWith('data:') ? image.data : `data:${image.mime || 'image/png'};base64,${image.data}`;
+    parts.push({ type: 'image_url', image_url: { url } });
+  }
+  return parts;
+}
+
+function guessLang(name: string): string {
+  const ext = name.toLowerCase().split('.').pop() ?? '';
+  const map: Record<string, string> = {
+    ts: 'ts', tsx: 'tsx', js: 'js', jsx: 'jsx', json: 'json', md: 'md', py: 'python',
+    rs: 'rust', go: 'go', css: 'css', html: 'html', sh: 'bash', sql: 'sql', yml: 'yaml', yaml: 'yaml',
+  };
+  return map[ext] ?? 'text';
+}
 
 /** Thrown for upstream failures; `publicMessage` is safe to send to the browser. */
 export class UpstreamError extends Error {
@@ -371,17 +457,10 @@ export async function resolveEngine(
   connectors: ConnectorRow[],
   secret: string,
 ): Promise<ResolvedEngine> {
-  const active = connectors.filter((c) => c.enabled && c.api_key_enc);
+  // Only LLM connectors can drive chat; voice and GitHub keys are skipped.
+  const active = connectors.filter((c) => c.enabled && c.api_key_enc && providerById(c.provider)?.kind === 'llm');
   if (!active.length) return { engine: 'demo' };
-  const chosen =
-    active.find((c) => c.is_default) ??
-    active.find((c) => providerById(c.provider)?.kind === 'llm') ??
-    active[0];
-  if (providerById(chosen.provider)?.kind === 'tts') {
-    const llm = active.find((c) => providerById(c.provider)?.kind === 'llm');
-    if (!llm) return { engine: 'demo' };
-    return { engine: 'llm', client: await toClient(llm, secret) };
-  }
+  const chosen = active.find((c) => c.is_default) ?? active[0];
   return { engine: 'llm', client: await toClient(chosen, secret) };
 }
 

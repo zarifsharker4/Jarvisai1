@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { ApiError, api, getPinToken, setPinToken } from './api';
-import type { Bootstrap, ChatSummary, Me } from './types';
+import type { Bootstrap, ChatSummary, Me, Project, TabId } from './types';
 
 type AppState = {
   ready: boolean;
@@ -27,6 +27,12 @@ type AppState = {
   theme: string;
   setTheme: (theme: string) => void;
   patchMe: (patch: Partial<Me>) => void;
+  projects: Project[];
+  activeProjectId: string | null;
+  setActiveProjectId: (id: string | null) => void;
+  refreshProjects: () => Promise<void>;
+  activeTab: TabId;
+  setActiveTab: (tab: TabId) => void;
   refreshChats: () => Promise<void>;
   refreshSession: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -41,6 +47,15 @@ export function useApp(): AppState {
 }
 
 const THEME_KEY = 'mindflayer_theme';
+const PROJECT_KEY = 'mindflayer_project';
+
+function loadActiveProject(): string | null {
+  try {
+    return localStorage.getItem(PROJECT_KEY);
+  } catch {
+    return null;
+  }
+}
 
 function applyTheme(theme: string): void {
   document.documentElement.dataset.theme = theme;
@@ -60,6 +75,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [chatsLocked, setChatsLocked] = useState(false);
   const [pinDialog, setPinDialog] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [activeProjectId, setActiveProjectIdState] = useState<string | null>(() => loadActiveProject());
+  const [activeTab, setActiveTab] = useState<TabId>('vecna');
   const [theme, setThemeState] = useState(() => {
     try {
       return localStorage.getItem(THEME_KEY) ?? 'classic';
@@ -81,6 +99,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  /** Load every isolated workspace; keeps the remembered selection valid. */
+  const refreshProjects = useCallback(async () => {
+    try {
+      const res = await api<{ projects: Project[] }>('/api/projects');
+      setProjects(res.projects);
+      setActiveProjectIdState((current) => {
+        if (current && res.projects.some((p) => p.id === current)) return current;
+        return res.projects[0]?.id ?? null;
+      });
+    } catch {
+      /* signed out or locked — the switcher renders its own empty state */
+    }
+  }, []);
+
+  const setActiveProjectId = useCallback((id: string | null) => {
+    setActiveProjectIdState(id);
+    try {
+      if (id) localStorage.setItem(PROJECT_KEY, id);
+      else localStorage.removeItem(PROJECT_KEY);
+    } catch {
+      /* private mode */
+    }
+  }, []);
+
   /** Pull the account behind the current session cookie (also used after OTP verify). */
   const refreshSession = useCallback(async () => {
     try {
@@ -90,13 +132,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       applyTheme(nextTheme);
       setThemeState(nextTheme);
       await refreshChats();
+      void refreshProjects();
       return;
     } catch (err) {
       setMe(null);
       if (err instanceof ApiError && err.status !== 401) setBanner(err.message);
       throw err;
     }
-  }, [refreshChats]);
+  }, [refreshChats, refreshProjects]);
 
   useEffect(() => {
     let cancelled = false;
@@ -161,6 +204,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setMe(null);
     setChats([]);
     setActiveChatId(null);
+    setProjects([]);
+    setActiveProjectIdState(null);
   }, []);
 
   const value = useMemo<AppState>(
@@ -181,6 +226,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       theme,
       setTheme,
       patchMe,
+      projects,
+      activeProjectId,
+      setActiveProjectId,
+      refreshProjects,
+      activeTab,
+      setActiveTab,
       refreshChats,
       refreshSession,
       signOut,
@@ -200,6 +251,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       theme,
       setTheme,
       patchMe,
+      projects,
+      activeProjectId,
+      setActiveProjectId,
+      refreshProjects,
+      activeTab,
+      setActiveTab,
       refreshChats,
       refreshSession,
       signOut,

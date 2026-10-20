@@ -93,6 +93,7 @@ export type ConnectorRow = {
   api_key_enc: string | null;
   model: string | null;
   is_default: number;
+  is_vecna: number;
   enabled: number;
   created_at: string;
   updated_at: string;
@@ -104,6 +105,43 @@ export type ChatRow = {
   title: string;
   mode: string;
   locked: number;
+  project_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProjectRow = {
+  id: string;
+  user_sub: string;
+  name: string;
+  description: string | null;
+  repo_full_name: string | null;
+  repo_branch: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProjectAiRow = {
+  id: string;
+  user_sub: string;
+  project_id: string;
+  connector_id: string | null;
+  slot: number;
+  field: string;
+  created_at: string;
+};
+
+export type FieldEntryRow = {
+  id: string;
+  user_sub: string;
+  author_tag: string;
+  handle: string;
+  title: string;
+  description: string;
+  app_url: string | null;
+  html: string | null;
+  tags: string;
+  stars: number;
   created_at: string;
   updated_at: string;
 };

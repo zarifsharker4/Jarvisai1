@@ -36,7 +36,7 @@ export type Bootstrap = {
 export type ProviderPreset = {
   id: string;
   label: string;
-  kind: 'llm' | 'tts';
+  kind: 'llm' | 'tts' | 'github';
   baseUrl: string;
   defaultModel?: string;
   docs: string;
@@ -94,21 +94,94 @@ export type Connector = {
   baseUrl: string | null;
   model: string | null;
   isDefault: boolean;
+  isVecna?: boolean;
   enabled: boolean;
-  kind: 'llm' | 'tts';
+  kind: 'llm' | 'tts' | 'github';
   hasKey: boolean;
   keyHint: string;
   createdAt: string;
 };
+
+export type Project = {
+  id: string;
+  name: string;
+  description: string | null;
+  repo: string | null;
+  branch: string;
+  aiCount: number;
+  createdAt: string;
+};
+
+export const AI_FIELDS = [
+  'unassigned',
+  'frontend',
+  'backend',
+  'fullstack',
+  'review',
+  'testing',
+  'docs',
+  'devops',
+  'research',
+  'design',
+] as const;
+
+export type ProjectAi = {
+  id: string;
+  slot: number;
+  label: string;
+  field: string;
+  connectorId: string | null;
+  connector: {
+    id: string;
+    name: string | null;
+    providerLabel: string | null;
+    model: string | null;
+    online: boolean;
+  } | null;
+};
+
+export type PoolMember = { slot: number; label: string; field: string; online: boolean };
+
+export type VecnaStatus = {
+  configured: boolean;
+  model: string | null;
+  provider: string | null;
+  name: string;
+  hasAnyKey: boolean;
+};
+
+export type Attachment = { kind: 'image' | 'text'; name: string; mime?: string; data: string };
+
+export type FieldEntry = {
+  handle: string;
+  title: string;
+  description: string;
+  appUrl: string | null;
+  authorTag: string;
+  tags: string[];
+  stars: number;
+  hasApp: boolean;
+  html?: string | null;
+  owned?: boolean;
+  createdAt: string;
+  cerebroUrl: string;
+};
+
+export type GhRepo = { full_name: string; name: string; default_branch: string; private: boolean };
+export type GhTreeEntry = { path: string; type: 'blob' | 'tree'; size?: number };
+export type GhStatus = { connected: boolean; login?: string; error?: string; defaultRepo: string; defaultBranch: string };
 
 export type ChatSummary = {
   id: string;
   title: string;
   mode: string;
   locked: boolean;
+  projectId: string | null;
   createdAt: string;
   updatedAt: string;
 };
+
+export type TabId = 'vecna' | 'hellfire' | 'manager' | 'projects' | 'field' | 'cerebro';
 
 export type ChatMessage = {
   id?: string;

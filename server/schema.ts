@@ -9,7 +9,7 @@ import type { D1Database } from './types';
  * Column additions for pre-existing databases run individually so one
  * "duplicate column name" cannot abort the rest of the migration.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const STATEMENTS: string[] = [
   `CREATE TABLE IF NOT EXISTS kv (
@@ -95,12 +95,51 @@ const STATEMENTS: string[] = [
      created_at TEXT NOT NULL DEFAULT (datetime('now')),
      sent_at TEXT
    )`,
+  `CREATE TABLE IF NOT EXISTS projects (
+     id TEXT PRIMARY KEY,
+     user_sub TEXT NOT NULL,
+     name TEXT NOT NULL,
+     description TEXT,
+     repo_full_name TEXT,
+     repo_branch TEXT,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_sub, created_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS project_ais (
+     id TEXT PRIMARY KEY,
+     user_sub TEXT NOT NULL,
+     project_id TEXT NOT NULL,
+     connector_id TEXT,
+     slot INTEGER NOT NULL,
+     field TEXT NOT NULL DEFAULT 'unassigned',
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     UNIQUE(project_id, slot)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_project_ais_project ON project_ais(project_id, slot)`,
+  `CREATE TABLE IF NOT EXISTS field_entries (
+     id TEXT PRIMARY KEY,
+     user_sub TEXT NOT NULL,
+     author_tag TEXT NOT NULL,
+     handle TEXT NOT NULL UNIQUE,
+     title TEXT NOT NULL,
+     description TEXT NOT NULL DEFAULT '',
+     app_url TEXT,
+     html TEXT,
+     tags TEXT NOT NULL DEFAULT '',
+     stars INTEGER NOT NULL DEFAULT 0,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_field_entries_created ON field_entries(created_at DESC)`,
 ];
 
 /** Additive migrations for databases created before a column existed. */
 const MIGRATIONS: string[] = [
   `ALTER TABLE users ADD COLUMN password_hash TEXT`,
   `ALTER TABLE users ADD COLUMN pin_hash TEXT`,
+  `ALTER TABLE connectors ADD COLUMN is_vecna INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE chats ADD COLUMN project_id TEXT`,
 ];
 
 const schemaReady = new WeakSet<D1Database>();

@@ -26,6 +26,11 @@ import { sendVecnaCode, VECNA_SENDER_ADDRESS, VECNA_SENDER_NAME } from './mail';
 import { PROVIDERS, providerById, testConnection, toClient } from './providers';
 import { DEFAULT_VOICES, listVoices } from './voice';
 import { aiRoutes } from './ai';
+import { githubRoutes } from './github';
+import { vecnaRoutes } from './vecna';
+import { hellfireRoutes } from './hellfire';
+import { projectAiRoutes, projectRoutes } from './projects';
+import { fieldRoutes } from './field';
 import { ensureSchema } from './schema';
 import type { AppDeps } from './deps';
 import type { ChatRow, ConnectorRow, Env, UserRow } from './types';
@@ -39,6 +44,12 @@ import type { ChatRow, ConnectorRow, Env, UserRow } from './types';
 export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
   app.route('/', aiRoutes(deps));
+  app.route('/', githubRoutes(deps));
+  app.route('/', vecnaRoutes(deps));
+  app.route('/', hellfireRoutes(deps));
+  app.route('/', projectRoutes(deps));
+  app.route('/', projectAiRoutes(deps));
+  app.route('/', fieldRoutes(deps));
 
   /* ---------------------------------------------------------------- *
    * Public routes
@@ -59,7 +70,27 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
     return Response.json(
       {
         app: 'Mind Flayer',
-        tagline: 'Mind Flayer · 3-agent collaborative coding',
+        tagline: 'Mind Flayer · Vecna + AI pool mobile coding workspace',
+        vecna: {
+          name: 'Vecna',
+          role: 'Supreme Guide — always active, separate from the worker AIs',
+          firstLoginPrompts: 'gemini-api-key',
+          voiceCall: 'user<->vecna',
+          ringtone: 'stranger-things-kids-theme',
+        },
+        workspace: {
+          aiTags: 'AI 1, AI 2, AI 3 …',
+          multiProject: true,
+          github: { defaultRepo: 'zarifsharker4/Jarvisai1', defaultBranch: 'main' },
+          tabs: [
+            { id: 'vecna', label: 'Vecna Chat' },
+            { id: 'hellfire', label: 'Hellfire · Group Chat & File IDE' },
+            { id: 'manager', label: 'API & Field Manager' },
+            { id: 'projects', label: 'Project Switcher' },
+            { id: 'field', label: 'The Field' },
+            { id: 'cerebro', label: 'Cerebro Search' },
+          ],
+        },
         auth: {
           method: 'email+password',
           otpDigits: 6,
@@ -562,6 +593,7 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
           baseUrl: row.base_url,
           model: row.model,
           isDefault: Boolean(row.is_default),
+          isVecna: Boolean(row.is_vecna),
           enabled: Boolean(row.enabled),
           kind: providerById(row.provider)?.kind ?? 'llm',
           hasKey: Boolean(row.api_key_enc),
@@ -586,6 +618,7 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
       apiKey?: string;
       model?: string;
       isDefault?: boolean;
+      isVecna?: boolean;
     } | null;
     const preset = providerById(body?.provider ?? '');
     if (!preset) return jsonError('Unknown provider', 400, { providers: PROVIDERS.map((p) => p.id) });
@@ -602,9 +635,15 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
         .bind(gate.user.sub)
         .run();
     }
+    if (body?.isVecna) {
+      // Vecna runs on exactly one connector — demote any previous one.
+      await c.env.DB!.prepare('UPDATE connectors SET is_vecna = 0 WHERE user_sub = ?1')
+        .bind(gate.user.sub)
+        .run();
+    }
     await c.env.DB!.prepare(
-      `INSERT INTO connectors (id, user_sub, provider, name, base_url, api_key_enc, model, is_default)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+      `INSERT INTO connectors (id, user_sub, provider, name, base_url, api_key_enc, model, is_default, is_vecna)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
     )
       .bind(
         id,
@@ -615,6 +654,7 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
         encrypted,
         body?.model?.trim() || preset.defaultModel || null,
         body?.isDefault ? 1 : 0,
+        body?.isVecna ? 1 : 0,
       )
       .run();
     return Response.json({ ok: true, id }, { status: 201, headers: PRIVATE_HEADERS });
@@ -724,7 +764,7 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
       if (!ok) return jsonError('PIN required to unlock chat history', 423, { reason: 'pin_required' });
     }
     const rows = await c.env.DB!.prepare(
-      'SELECT id, title, mode, locked, created_at, updated_at FROM chats WHERE user_sub = ?1 ORDER BY updated_at DESC LIMIT 100',
+      'SELECT id, title, mode, locked, project_id, created_at, updated_at FROM chats WHERE user_sub = ?1 ORDER BY updated_at DESC LIMIT 100',
     )
       .bind(gate.user.sub)
       .all<ChatRow>();
@@ -735,6 +775,7 @@ export function createApp(deps: AppDeps): Hono<{ Bindings: Env }> {
           title: row.title,
           mode: row.mode,
           locked: Boolean(row.locked) || Boolean(gate.user.pin_hash),
+          projectId: row.project_id ?? null,
           createdAt: row.created_at,
           updatedAt: row.updated_at,
         })),
